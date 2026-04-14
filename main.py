@@ -15,7 +15,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
-from supabase.lib.client_options import ClientOptions
 
 
 # =========================================================
@@ -66,7 +65,6 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(
     SUPABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY,
-    options=ClientOptions(auto_refresh_token=False, persist_session=False, schema="public"),
 )
 
 
