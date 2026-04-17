@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import sqlite3
@@ -8,6 +9,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 # =========================================================
@@ -17,17 +19,20 @@ from pydantic import BaseModel, Field
 APP_NAME = "ExpoAI Single File Backend"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "expoai.db"
+
 STORAGE_DIR = BASE_DIR / "storage"
 BRAND_ASSETS_DIR = STORAGE_DIR / "brand_assets"
+ARTWORK_DIR = STORAGE_DIR / "artwork"
 
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 BRAND_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+ARTWORK_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title=APP_NAME, version="0.1.0")
+app = FastAPI(title=APP_NAME, version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # later replace with your frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -118,6 +123,28 @@ def init_db() -> None:
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS panel_artworks (
+        id TEXT PRIMARY KEY,
+        panel_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        version_no INTEGER NOT NULL,
+        headline TEXT,
+        subheadline TEXT,
+        cta TEXT,
+        qr_url TEXT,
+        style_hint TEXT,
+        bg_color TEXT,
+        accent_color TEXT,
+        text_color TEXT,
+        svg_path TEXT NOT NULL,
+        json_path TEXT NOT NULL,
+        preview_path TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -135,7 +162,7 @@ class BoothInput(BaseModel):
     width_mm: int = Field(..., gt=0)
     depth_mm: int = Field(..., gt=0)
     height_mm: int = Field(..., gt=0)
-    booth_type: str = "peninsula"   # inline / corner / peninsula
+    booth_type: str = "peninsula"
     open_sides: int = Field(3, ge=1, le=3)
     style: str = "premium modern tech"
 
@@ -159,11 +186,22 @@ class LayoutGenerateRequest(BaseModel):
     storage_required: bool = True
 
 
+class ArtworkGenerateRequest(BaseModel):
+    headline: str = "Build Smarter AI Workflows"
+    subheadline: str = "Enterprise AI platform for modern teams"
+    cta: str = "Scan to book a demo"
+    qr_url: str = "https://example.com/demo"
+    style_hint: str = "premium tech"
+    bg_color: str = "#0B1020"
+    accent_color: str = "#4F7CFF"
+    text_color: str = "#FFFFFF"
+
+
 # =========================================================
 # HELPERS
 # =========================================================
 
-def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
     return dict(row) if row else {}
 
 
@@ -186,6 +224,17 @@ def fetch_brand(brand_id: str) -> sqlite3.Row:
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Brand not found")
+    return row
+
+
+def fetch_panel(panel_id: str) -> sqlite3.Row:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM panels WHERE id = ?", (panel_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Panel not found")
     return row
 
 
@@ -224,6 +273,14 @@ def ensure_project_brand(project_id: str) -> str:
 def clear_old_layout(project_id: str) -> None:
     conn = get_conn()
     cur = conn.cursor()
+
+    cur.execute("SELECT id FROM panels WHERE project_id = ?", (project_id,))
+    panel_rows = cur.fetchall()
+    panel_ids = [r["id"] for r in panel_rows]
+
+    for panel_id in panel_ids:
+        cur.execute("DELETE FROM panel_artworks WHERE panel_id = ?", (panel_id,))
+
     cur.execute("DELETE FROM zones WHERE project_id = ?", (project_id,))
     cur.execute("DELETE FROM panels WHERE project_id = ?", (project_id,))
     conn.commit()
@@ -288,9 +345,8 @@ def generate_layout_data(booth: dict[str, Any], req: LayoutGenerateRequest) -> d
             "rules": {"screens": req.screens},
         })
 
-    # Basic printable panels
     fascia_h = 500
-    backwall_h = min(3000, height - 200)
+    backwall_h = min(3000, max(1800, height - 200))
     backwall_w = max(2000, width - 60)
     sidewall_d = max(1500, depth - 60)
 
@@ -409,6 +465,13 @@ def get_project_full(project_id: str) -> dict[str, Any]:
     cur.execute("SELECT * FROM brand_assets WHERE project_id = ?", (project_id,))
     assets = cur.fetchall()
 
+    cur.execute("""
+        SELECT * FROM panel_artworks
+        WHERE project_id = ?
+        ORDER BY created_at DESC
+    """, (project_id,))
+    artworks = cur.fetchall()
+
     brand = None
     if project["brand_id"]:
         cur.execute("SELECT * FROM brands WHERE id = ?", (project["brand_id"],))
@@ -450,7 +513,235 @@ def get_project_full(project_id: str) -> dict[str, Any]:
             }
             for p in panels
         ],
+        "artworks": [
+            {
+                **dict(a),
+                "payload": json.loads(a["payload_json"]) if a["payload_json"] else {},
+            }
+            for a in artworks
+        ],
     }
+
+
+def get_latest_brand_asset_for_project(project_id: str, asset_type: str = "logo") -> Optional[sqlite3.Row]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM brand_assets
+        WHERE project_id = ? AND asset_type = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (project_id, asset_type),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def next_artwork_version(panel_id: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(MAX(version_no), 0) AS max_version FROM panel_artworks WHERE panel_id = ?",
+        (panel_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return int(row["max_version"]) + 1
+
+
+def wrap_text_for_svg(text: str, max_chars: int = 28) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+
+    lines = []
+    current = ""
+
+    for word in words:
+        test = word if not current else f"{current} {word}"
+        if len(test) <= max_chars:
+            current = test
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines[:4]
+
+
+def image_href_from_file(path_str: str) -> Optional[str]:
+    path = Path(path_str)
+    if not path.exists():
+        return None
+    ext = path.suffix.lower()
+    if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]:
+        return path.resolve().as_uri()
+    return None
+
+
+def generate_svg_artwork(
+    panel: sqlite3.Row,
+    project: sqlite3.Row,
+    payload: ArtworkGenerateRequest,
+    logo_asset: Optional[sqlite3.Row] = None,
+) -> str:
+    panel_w = int(panel["width_mm"])
+    panel_h = int(panel["height_mm"])
+    safe = int(panel["safe_margin_mm"])
+    bleed = int(panel["bleed_mm"])
+
+    bg_color = payload.bg_color
+    accent_color = payload.accent_color
+    text_color = payload.text_color
+
+    headline_lines = wrap_text_for_svg(payload.headline, max_chars=26 if panel_w < 3000 else 34)
+    sub_lines = wrap_text_for_svg(payload.subheadline, max_chars=40 if panel_w < 3000 else 52)
+
+    headline_svg = ""
+    start_y = max(180, panel_h * 0.28)
+    for i, line in enumerate(headline_lines):
+        headline_svg += (
+            f'<text x="{safe + 70}" y="{start_y + i * 100}" '
+            f'font-family="Arial, Helvetica, sans-serif" font-size="78" font-weight="700" '
+            f'fill="{html.escape(text_color)}">{html.escape(line)}</text>'
+        )
+
+    sub_svg = ""
+    sub_start_y = start_y + len(headline_lines) * 100 + 40
+    for i, line in enumerate(sub_lines):
+        sub_svg += (
+            f'<text x="{safe + 70}" y="{sub_start_y + i * 48}" '
+            f'font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="400" '
+            f'fill="{html.escape(text_color)}" opacity="0.92">{html.escape(line)}</text>'
+        )
+
+    cta_y = panel_h - safe - 120
+    qr_box_size = 180
+
+    logo_svg = ""
+    logo_x = panel_w - safe - 320
+    logo_y = safe + 40
+    logo_href = None
+
+    if logo_asset:
+        logo_href = image_href_from_file(logo_asset["file_url"])
+
+    if logo_href:
+        logo_svg = (
+            f'<image href="{html.escape(logo_href)}" '
+            f'x="{logo_x}" y="{logo_y}" width="240" height="120" preserveAspectRatio="xMidYMid meet" />'
+        )
+    else:
+        logo_svg = f"""
+        <rect x="{logo_x}" y="{logo_y}" width="240" height="120" rx="14" fill="none"
+              stroke="{html.escape(text_color)}" stroke-width="3" opacity="0.8"/>
+        <text x="{logo_x + 28}" y="{logo_y + 72}"
+              font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700"
+              fill="{html.escape(text_color)}">LOGO</text>
+        """
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{panel_w + bleed * 2}" height="{panel_h + bleed * 2}" viewBox="0 0 {panel_w + bleed * 2} {panel_h + bleed * 2}">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="{html.escape(bg_color)}"/>
+      <stop offset="100%" stop-color="#111A36"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="{html.escape(accent_color)}"/>
+      <stop offset="100%" stop-color="#7FA2FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="{panel_w + bleed * 2}" height="{panel_h + bleed * 2}" fill="#ffffff"/>
+  <rect x="{bleed}" y="{bleed}" width="{panel_w}" height="{panel_h}" fill="url(#bgGrad)"/>
+
+  <rect x="{bleed + safe}" y="{bleed + safe}" width="{panel_w - safe * 2}" height="{panel_h - safe * 2}"
+        fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2" stroke-dasharray="10 8"/>
+
+  <circle cx="{bleed + panel_w - 260}" cy="{bleed + 180}" r="220" fill="{html.escape(accent_color)}" opacity="0.13"/>
+  <circle cx="{bleed + 180}" cy="{bleed + panel_h - 140}" r="160" fill="{html.escape(accent_color)}" opacity="0.12"/>
+
+  <rect x="{bleed + safe + 70}" y="{bleed + 110}" width="180" height="12" rx="6" fill="url(#accentGrad)"/>
+
+  {logo_svg}
+
+  <g transform="translate({bleed}, {bleed})">
+    {headline_svg}
+    {sub_svg}
+  </g>
+
+  <g transform="translate({bleed}, {bleed})">
+    <rect x="{safe + 70}" y="{cta_y - 56}" width="{max(320, min(620, len(payload.cta) * 18 + 80))}" height="74"
+          rx="16" fill="{html.escape(accent_color)}"/>
+    <text x="{safe + 105}" y="{cta_y - 8}" font-family="Arial, Helvetica, sans-serif" font-size="30"
+          font-weight="700" fill="#ffffff">{html.escape(payload.cta)}</text>
+  </g>
+
+  <g transform="translate({bleed}, {bleed})">
+    <rect x="{panel_w - safe - qr_box_size - 70}" y="{panel_h - safe - qr_box_size - 30}"
+          width="{qr_box_size}" height="{qr_box_size}" rx="12" fill="#ffffff"/>
+    <rect x="{panel_w - safe - qr_box_size - 50}" y="{panel_h - safe - qr_box_size - 10}"
+          width="{qr_box_size - 40}" height="{qr_box_size - 40}" rx="8" fill="#f2f4f8" stroke="#d0d7e2"/>
+    <text x="{panel_w - safe - qr_box_size - 5}" y="{panel_h - safe - 48}"
+          font-family="Arial, Helvetica, sans-serif" font-size="20" text-anchor="end"
+          fill="{html.escape(text_color)}">QR</text>
+    <text x="{safe + 70}" y="{panel_h - safe - 22}"
+          font-family="Arial, Helvetica, sans-serif" font-size="20"
+          fill="{html.escape(text_color)}" opacity="0.7">{html.escape(project["name"])} • {html.escape(panel["panel_code"])}</text>
+  </g>
+</svg>
+"""
+    return svg
+
+
+def save_artwork_files(
+    project_id: str,
+    panel_id: str,
+    version_no: int,
+    svg_content: str,
+    payload_dict: dict[str, Any],
+) -> tuple[str, str, str]:
+    project_dir = ARTWORK_DIR / project_id / panel_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    svg_path = project_dir / f"v{version_no}.svg"
+    json_path = project_dir / f"v{version_no}.json"
+    preview_path = project_dir / f"v{version_no}_preview.svg"
+
+    svg_path.write_text(svg_content, encoding="utf-8")
+    json_path.write_text(json.dumps(payload_dict, indent=2), encoding="utf-8")
+    preview_path.write_text(svg_content, encoding="utf-8")
+
+    return str(svg_path), str(json_path), str(preview_path)
+
+
+def latest_artwork_for_panel(panel_id: str) -> Optional[sqlite3.Row]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM panel_artworks
+        WHERE panel_id = ?
+        ORDER BY version_no DESC
+        LIMIT 1
+        """,
+        (panel_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_all_panels_for_project(project_id: str) -> list[sqlite3.Row]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM panels WHERE project_id = ? ORDER BY panel_code", (project_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 # =========================================================
@@ -687,6 +978,225 @@ def generate_layout(project_id: str, payload: LayoutGenerateRequest):
         "booth": booth,
         "zones": layout["zones"],
         "panels": layout["panels"],
+    }
+
+
+@app.get("/v1/projects/{project_id}/panels")
+def list_project_panels(project_id: str):
+    fetch_project(project_id)
+    panels = get_all_panels_for_project(project_id)
+    return {
+        "items": [
+            {
+                **dict(p),
+                "meta": json.loads(p["meta_json"]) if p["meta_json"] else {},
+            }
+            for p in panels
+        ]
+    }
+
+
+@app.post("/v1/panels/{panel_id}/artwork/generate")
+def generate_panel_artwork(panel_id: str, payload: ArtworkGenerateRequest):
+    panel = fetch_panel(panel_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM projects WHERE id = ?", (panel["project_id"],))
+    project = cur.fetchone()
+    conn.close()
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found for this panel")
+
+    logo_asset = get_latest_brand_asset_for_project(panel["project_id"], "logo")
+
+    version_no = next_artwork_version(panel_id)
+    svg_content = generate_svg_artwork(panel, project, payload, logo_asset=logo_asset)
+
+    payload_dict = payload.model_dump()
+    payload_dict["panel_id"] = panel_id
+    payload_dict["panel_code"] = panel["panel_code"]
+    payload_dict["panel_type"] = panel["panel_type"]
+    payload_dict["panel_size"] = {
+        "width_mm": panel["width_mm"],
+        "height_mm": panel["height_mm"],
+        "bleed_mm": panel["bleed_mm"],
+        "safe_margin_mm": panel["safe_margin_mm"],
+    }
+
+    svg_path, json_path, preview_path = save_artwork_files(
+        project["id"], panel_id, version_no, svg_content, payload_dict
+    )
+
+    artwork_id = str(uuid.uuid4())
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO panel_artworks (
+            id, panel_id, project_id, version_no,
+            headline, subheadline, cta, qr_url, style_hint,
+            bg_color, accent_color, text_color,
+            svg_path, json_path, preview_path, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            artwork_id,
+            panel_id,
+            project["id"],
+            version_no,
+            payload.headline,
+            payload.subheadline,
+            payload.cta,
+            payload.qr_url,
+            payload.style_hint,
+            payload.bg_color,
+            payload.accent_color,
+            payload.text_color,
+            svg_path,
+            json_path,
+            preview_path,
+            json.dumps(payload_dict),
+            now_iso(),
+        ),
+    )
+    cur.execute(
+        "UPDATE projects SET updated_at = ?, status = ? WHERE id = ?",
+        (now_iso(), "artwork_generated", project["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "message": "Artwork generated successfully",
+        "artwork_id": artwork_id,
+        "panel_id": panel_id,
+        "panel_code": panel["panel_code"],
+        "version_no": version_no,
+        "svg_download_url": f"/v1/panels/{panel_id}/artwork/latest/svg",
+        "json_download_url": f"/v1/panels/{panel_id}/artwork/latest/json",
+        "preview_url": f"/v1/panels/{panel_id}/artwork/latest/preview",
+    }
+
+
+@app.get("/v1/panels/{panel_id}/artwork")
+def list_panel_artworks(panel_id: str):
+    fetch_panel(panel_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM panel_artworks
+        WHERE panel_id = ?
+        ORDER BY version_no DESC
+        """,
+        (panel_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    return {
+        "items": [
+            {
+                **dict(r),
+                "payload": json.loads(r["payload_json"]) if r["payload_json"] else {},
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/v1/panels/{panel_id}/artwork/latest")
+def get_latest_panel_artwork(panel_id: str):
+    row = latest_artwork_for_panel(panel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No artwork found for this panel")
+
+    return {
+        **dict(row),
+        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+    }
+
+
+@app.get("/v1/panels/{panel_id}/artwork/latest/svg")
+def download_latest_panel_svg(panel_id: str):
+    row = latest_artwork_for_panel(panel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No artwork found for this panel")
+
+    svg_path = row["svg_path"]
+    if not os.path.exists(svg_path):
+        raise HTTPException(status_code=404, detail="SVG file not found")
+
+    return FileResponse(
+        svg_path,
+        media_type="image/svg+xml",
+        filename=Path(svg_path).name,
+    )
+
+
+@app.get("/v1/panels/{panel_id}/artwork/latest/preview")
+def preview_latest_panel_svg(panel_id: str):
+    row = latest_artwork_for_panel(panel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No artwork found for this panel")
+
+    preview_path = row["preview_path"]
+    if not os.path.exists(preview_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+
+    return FileResponse(
+        preview_path,
+        media_type="image/svg+xml",
+        filename=Path(preview_path).name,
+    )
+
+
+@app.get("/v1/panels/{panel_id}/artwork/latest/json")
+def download_latest_panel_json(panel_id: str):
+    row = latest_artwork_for_panel(panel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No artwork found for this panel")
+
+    json_path = row["json_path"]
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail="JSON file not found")
+
+    return FileResponse(
+        json_path,
+        media_type="application/json",
+        filename=Path(json_path).name,
+    )
+
+
+@app.get("/v1/projects/{project_id}/artworks")
+def list_project_artworks(project_id: str):
+    fetch_project(project_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM panel_artworks
+        WHERE project_id = ?
+        ORDER BY created_at DESC
+        """,
+        (project_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    return {
+        "items": [
+            {
+                **dict(r),
+                "payload": json.loads(r["payload_json"]) if r["payload_json"] else {},
+            }
+            for r in rows
+        ]
     }
 
 
