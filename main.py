@@ -1,12 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
 import uuid
 
-app = FastAPI(title="BriefCraft AI Engine")
+from ai import generate_concepts
+from db import PROJECTS, BRIEFS, CONCEPTS, OUTPUTS
 
-# ---------------- CORS ----------------
+app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,168 +15,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- DATABASE (IN-MEMORY FOR MVP) ----------------
-PROJECTS = {}
-BRIEFS = {}
-CONCEPTS = {}
-OUTPUTS = {}
-FEEDBACK = {}
-
-# ---------------- MODELS ----------------
-class ProjectCreate(BaseModel):
-    name: str
-    project_type: str
-
-class BriefCreate(BaseModel):
-    notes: str
-
-class ConceptEdit(BaseModel):
-    title: Optional[str] = None
-    one_liner: Optional[str] = None
-    style: Optional[str] = None
-
-class FeedbackCreate(BaseModel):
-    target_type: str   # concept / output / layout / cad
-    target_id: str
-    rating: int
-    comment: str
-
-# ---------------- HEALTH ----------------
-@app.get("/health")
-def health():
-    return {"status": "ok", "app": "BriefCraft AI Engine"}
-
 # ---------------- PROJECT ----------------
-@app.post("/v1/projects")
-def create_project(payload: ProjectCreate):
+@app.post("/project/create")
+def create_project():
     pid = str(uuid.uuid4())
-
-    PROJECTS[pid] = {
-        "id": pid,
-        "name": payload.name,
-        "project_type": payload.project_type
-    }
-
+    PROJECTS[pid] = {"id": pid}
     return {"project_id": pid}
 
-@app.get("/v1/projects")
-def list_projects():
-    return {"items": list(PROJECTS.values())}
-
 # ---------------- BRIEF ----------------
-@app.post("/v1/projects/{project_id}/brief")
-def create_brief(project_id: str, payload: BriefCreate):
+@app.post("/project/{pid}/brief")
+def save_brief(pid: str, data: dict):
+    BRIEFS[pid] = data["brief"]
+    return {"status": "saved"}
 
-    if project_id not in PROJECTS:
-        raise HTTPException(404, "Project not found")
+# ---------------- CONCEPTS ----------------
+@app.post("/project/{pid}/concepts")
+def concepts(pid: str):
 
-    BRIEFS[project_id] = payload.notes
+    brief = BRIEFS.get(pid, "")
 
-    return {"message": "Brief saved"}
+    data = generate_concepts(brief)
 
-# ---------------- CONCEPT ENGINE ----------------
-@app.post("/v1/projects/{project_id}/concepts/generate")
-def generate_concepts(project_id: str):
+    CONCEPTS[pid] = data
 
-    if project_id not in PROJECTS:
-        raise HTTPException(404, "Project not found")
+    return {"items": data}
 
-    concepts = [
-        {
-            "id": str(uuid.uuid4()),
-            "title": "AI Command Center Booth",
-            "one_liner": "Futuristic control room style immersive booth",
-            "style": "dark neon tech",
-            "board_url": "/mock/3d1"
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "title": "Smart City Dome Experience",
-            "one_liner": "360° immersive dome with AI city simulation",
-            "style": "immersive LED dome",
-            "board_url": "/mock/3d2"
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "title": "Robotics Live Arena",
-            "one_liner": "Open demo arena for robot interaction",
-            "style": "industrial futuristic",
-            "board_url": "/mock/3d3"
-        }
-    ]
+# ---------------- OUTPUTS ----------------
+@app.post("/project/{pid}/outputs")
+def outputs(pid: str):
 
-    CONCEPTS[project_id] = concepts
+    CONCEPTS[pid]
 
-    return {"items": concepts}
-
-# ---------------- EDIT CONCEPT ----------------
-@app.put("/v1/concepts/{concept_id}")
-def edit_concept(concept_id: str, payload: ConceptEdit):
-
-    for project_id, concepts in CONCEPTS.items():
-        for c in concepts:
-            if c["id"] == concept_id:
-
-                if payload.title:
-                    c["title"] = payload.title
-                if payload.one_liner:
-                    c["one_liner"] = payload.one_liner
-                if payload.style:
-                    c["style"] = payload.style
-
-                return {"message": "Concept updated", "concept": c}
-
-    raise HTTPException(404, "Concept not found")
-
-# ---------------- OUTPUT GENERATION ----------------
-@app.post("/v1/projects/{project_id}/generate-all-from-selected-concept")
-def generate_outputs(project_id: str):
-
-    outputs = [
-        {
-            "id": str(uuid.uuid4()),
-            "type": "2D Layout",
-            "file_url": "/mock/layout2d.png"
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "type": "3D Render",
-            "file_url": "/mock/render3d.png"
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "type": "CAD Production Drawing",
-            "file_url": "/mock/cad.pdf"
-        }
-    ]
-
-    OUTPUTS[project_id] = outputs
-
-    return {"outputs": outputs}
-
-# ---------------- FEEDBACK SYSTEM ----------------
-@app.post("/v1/feedback")
-def add_feedback(payload: FeedbackCreate):
-
-    fid = str(uuid.uuid4())
-
-    FEEDBACK[fid] = {
-        "id": fid,
-        "target_type": payload.target_type,
-        "target_id": payload.target_id,
-        "rating": payload.rating,
-        "comment": payload.comment
+    result = {
+        "outputs": [
+            {"type": "2D Layout", "url": "/mock/2d"},
+            {"type": "3D Render", "url": "/mock/3d"},
+            {"type": "CAD", "url": "/mock/cad"}
+        ]
     }
 
-    return {"message": "Feedback saved", "id": fid}
+    OUTPUTS[pid] = result
 
-@app.get("/v1/feedback")
-def get_feedback():
-    return {"items": list(FEEDBACK.values())}
-
-# ---------------- MOCK ROUTES (FOR PREVIEW) ----------------
-@app.get("/mock/{file_id}")
-def mock_files(file_id: str):
-    return {
-        "preview": f"Mock preview for {file_id}"
-    }
+    return result
