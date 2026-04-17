@@ -9,26 +9,26 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 # =========================================================
-# BASIC CONFIG
+# CONFIG
 # =========================================================
 
-APP_NAME = "ExpoAI Single File Backend"
+APP_NAME = "ExpoAI Concept-First Backend"
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "expoai.db"
 
 STORAGE_DIR = BASE_DIR / "storage"
-BRAND_ASSETS_DIR = STORAGE_DIR / "brand_assets"
-ARTWORK_DIR = STORAGE_DIR / "artwork"
+DB_PATH = STORAGE_DIR / "expoai.db"
+REFERENCE_DIR = STORAGE_DIR / "reference_images"
+CONCEPT_DIR = STORAGE_DIR / "concepts"
+OUTPUT_DIR = STORAGE_DIR / "outputs"
 
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-BRAND_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-ARTWORK_DIR.mkdir(parents=True, exist_ok=True)
+for p in [STORAGE_DIR, REFERENCE_DIR, CONCEPT_DIR, OUTPUT_DIR]:
+    p.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title=APP_NAME, version="0.2.0")
+app = FastAPI(title=APP_NAME, version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,33 +38,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # =========================================================
-# DATABASE
+# UTILS
 # =========================================================
 
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
+def normalize_id(value: str) -> str:
+    value = (value or "").strip()
+    value = "".join(ch for ch in value if ch.isalnum() or ch == "-")
+    return value
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    return dict(row) if row else {}
+
+def json_load(value: Optional[str], fallback: Any = None) -> Any:
+    if value in [None, ""]:
+        return fallback
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+def safe_text(value: str) -> str:
+    return html.escape(value or "")
+
+def wrap_text(text: str, max_chars: int) -> list[str]:
+    words = (text or "").split()
+    if not words:
+        return [""]
+    lines = []
+    current = ""
+    for word in words:
+        test = word if not current else f"{current} {word}"
+        if len(test) <= max_chars:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines[:5]
+
+# =========================================================
+# DATABASE
+# =========================================================
 
 def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS brands (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        lock_mode TEXT NOT NULL DEFAULT 'controlled',
-        created_at TEXT NOT NULL
-    )
-    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS projects (
@@ -72,74 +101,72 @@ def init_db() -> None:
         name TEXT NOT NULL,
         project_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'draft',
-        brand_id TEXT,
-        booth_json TEXT NOT NULL,
-        brief_json TEXT,
+        selected_concept_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS brand_assets (
+    CREATE TABLE IF NOT EXISTS briefs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
-        brand_id TEXT NOT NULL,
-        asset_type TEXT NOT NULL,
-        file_url TEXT NOT NULL,
-        meta_json TEXT,
+        brief_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reference_images (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        label TEXT,
+        notes TEXT,
+        file_path TEXT NOT NULL,
         created_at TEXT NOT NULL
     )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS zones (
+    CREATE TABLE IF NOT EXISTS concepts (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
-        zone_type TEXT NOT NULL,
-        x_mm INTEGER NOT NULL,
-        y_mm INTEGER NOT NULL,
-        w_mm INTEGER NOT NULL,
-        d_mm INTEGER NOT NULL,
-        h_mm INTEGER,
-        rules_json TEXT
+        concept_no INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        one_liner TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        design_story TEXT NOT NULL,
+        style_direction TEXT NOT NULL,
+        layout_direction TEXT NOT NULL,
+        materials_json TEXT NOT NULL,
+        colors_json TEXT NOT NULL,
+        hero_visual TEXT NOT NULL,
+        board_path TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS panels (
+    CREATE TABLE IF NOT EXISTS concept_reference_links (
         id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        panel_code TEXT NOT NULL,
-        panel_type TEXT NOT NULL,
-        surface_ref TEXT NOT NULL,
-        width_mm INTEGER NOT NULL,
-        height_mm INTEGER NOT NULL,
-        bleed_mm INTEGER NOT NULL DEFAULT 10,
-        safe_margin_mm INTEGER NOT NULL DEFAULT 20,
-        material TEXT,
-        print_mode TEXT NOT NULL DEFAULT 'print',
-        meta_json TEXT
+        concept_id TEXT NOT NULL,
+        reference_image_id TEXT NOT NULL,
+        caption TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 1
     )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS panel_artworks (
+    CREATE TABLE IF NOT EXISTS outputs (
         id TEXT PRIMARY KEY,
-        panel_id TEXT NOT NULL,
         project_id TEXT NOT NULL,
-        version_no INTEGER NOT NULL,
-        headline TEXT,
-        subheadline TEXT,
-        cta TEXT,
-        qr_url TEXT,
-        style_hint TEXT,
-        bg_color TEXT,
-        accent_color TEXT,
-        text_color TEXT,
-        svg_path TEXT NOT NULL,
-        json_path TEXT NOT NULL,
-        preview_path TEXT NOT NULL,
+        concept_id TEXT NOT NULL,
+        output_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        file_path TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL
     )
@@ -148,64 +175,50 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-
 @app.on_event("startup")
 def startup_event() -> None:
     init_db()
 
-
 # =========================================================
-# Pydantic MODELS
+# MODELS
 # =========================================================
-
-class BoothInput(BaseModel):
-    width_mm: int = Field(..., gt=0)
-    depth_mm: int = Field(..., gt=0)
-    height_mm: int = Field(..., gt=0)
-    booth_type: str = "peninsula"
-    open_sides: int = Field(3, ge=1, le=3)
-    style: str = "premium modern tech"
-
 
 class ProjectCreate(BaseModel):
     name: str
-    project_type: str = "stall"
-    booth: BoothInput
-    brief: dict[str, Any] | None = None
+    project_type: str = "exhibition_booth"  # exhibition_booth / event_stage / decor_zone / backdrop / experience_area
 
+class BriefSubmit(BaseModel):
+    brand_name: str
+    event_name: str = ""
+    width_mm: int = Field(..., gt=0)
+    depth_mm: int = Field(..., gt=0)
+    height_mm: int = Field(3500, gt=0)
+    target_audience: str = ""
+    goals: list[str] = []
+    key_messages: list[str] = []
+    must_have_zones: list[str] = []
+    style_keywords: list[str] = []
+    materials_preferences: list[str] = []
+    budget_level: str = "mid"
+    notes: str = ""
 
-class BrandCreate(BaseModel):
-    name: str
-    lock_mode: str = "controlled"
-    project_id: Optional[str] = None
-
-
-class LayoutGenerateRequest(BaseModel):
-    zones: list[str] = ["reception", "meeting", "storage", "display"]
-    screens: int = 1
-    storage_required: bool = True
-
-
-class ArtworkGenerateRequest(BaseModel):
-    headline: str = "Build Smarter AI Workflows"
-    subheadline: str = "Enterprise AI platform for modern teams"
-    cta: str = "Scan to book a demo"
-    qr_url: str = "https://example.com/demo"
-    style_hint: str = "premium tech"
-    bg_color: str = "#0B1020"
-    accent_color: str = "#4F7CFF"
-    text_color: str = "#FFFFFF"
-
+class ConceptUpdate(BaseModel):
+    title: Optional[str] = None
+    one_liner: Optional[str] = None
+    summary: Optional[str] = None
+    design_story: Optional[str] = None
+    style_direction: Optional[str] = None
+    layout_direction: Optional[str] = None
+    materials: Optional[list[str]] = None
+    colors: Optional[list[str]] = None
+    hero_visual: Optional[str] = None
 
 # =========================================================
-# HELPERS
+# FETCH HELPERS
 # =========================================================
-
-def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
-    return dict(row) if row else {}
-
 
 def fetch_project(project_id: str) -> sqlite3.Row:
+    project_id = normalize_id(project_id)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
@@ -215,534 +228,569 @@ def fetch_project(project_id: str) -> sqlite3.Row:
         raise HTTPException(status_code=404, detail="Project not found")
     return row
 
-
-def fetch_brand(brand_id: str) -> sqlite3.Row:
+def fetch_brief(project_id: str) -> sqlite3.Row:
+    project = fetch_project(project_id)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM brands WHERE id = ?", (brand_id,))
+    cur.execute("SELECT * FROM briefs WHERE project_id = ?", (project["id"],))
     row = cur.fetchone()
     conn.close()
     if not row:
-        raise HTTPException(status_code=404, detail="Brand not found")
+        raise HTTPException(status_code=404, detail="Brief not found")
     return row
 
-
-def fetch_panel(panel_id: str) -> sqlite3.Row:
+def fetch_concept(concept_id: str) -> sqlite3.Row:
+    concept_id = normalize_id(concept_id)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM panels WHERE id = ?", (panel_id,))
+    cur.execute("SELECT * FROM concepts WHERE id = ?", (concept_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
-        raise HTTPException(status_code=404, detail="Panel not found")
+        raise HTTPException(status_code=404, detail="Concept not found")
     return row
 
-
-def ensure_project_brand(project_id: str) -> str:
+def fetch_reference_image(reference_id: str) -> sqlite3.Row:
+    reference_id = normalize_id(reference_id)
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
-    project = cur.fetchone()
-    if not project:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    if project["brand_id"]:
-        brand_id = project["brand_id"]
-        conn.close()
-        return brand_id
-
-    brand_id = str(uuid.uuid4())
-    brand_name = f'{project["name"]} Brand'
-    created_at = now_iso()
-
-    cur.execute(
-        "INSERT INTO brands (id, name, lock_mode, created_at) VALUES (?, ?, ?, ?)",
-        (brand_id, brand_name, "controlled", created_at),
-    )
-    cur.execute(
-        "UPDATE projects SET brand_id = ?, updated_at = ? WHERE id = ?",
-        (brand_id, now_iso(), project_id),
-    )
-    conn.commit()
+    cur.execute("SELECT * FROM reference_images WHERE id = ?", (reference_id,))
+    row = cur.fetchone()
     conn.close()
-    return brand_id
+    if not row:
+        raise HTTPException(status_code=404, detail="Reference image not found")
+    return row
 
-
-def clear_old_layout(project_id: str) -> None:
+def fetch_output(output_id: str) -> sqlite3.Row:
+    output_id = normalize_id(output_id)
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("SELECT id FROM panels WHERE project_id = ?", (project_id,))
-    panel_rows = cur.fetchall()
-    panel_ids = [r["id"] for r in panel_rows]
-
-    for panel_id in panel_ids:
-        cur.execute("DELETE FROM panel_artworks WHERE panel_id = ?", (panel_id,))
-
-    cur.execute("DELETE FROM zones WHERE project_id = ?", (project_id,))
-    cur.execute("DELETE FROM panels WHERE project_id = ?", (project_id,))
-    conn.commit()
+    cur.execute("SELECT * FROM outputs WHERE id = ?", (output_id,))
+    row = cur.fetchone()
     conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Output not found")
+    return row
 
-
-def generate_layout_data(booth: dict[str, Any], req: LayoutGenerateRequest) -> dict[str, Any]:
-    width = booth["width_mm"]
-    depth = booth["depth_mm"]
-    height = booth["height_mm"]
-
-    zones: list[dict[str, Any]] = []
-    panels: list[dict[str, Any]] = []
-
-    margin = 200
-    reception_w = min(1800, max(1200, width // 4))
-    reception_d = 700
-
-    if "reception" in req.zones:
-        zones.append({
-            "zone_type": "reception",
-            "x_mm": margin,
-            "y_mm": margin,
-            "w_mm": reception_w,
-            "d_mm": reception_d,
-            "h_mm": 1100,
-            "rules": {"facing": "front_open_side"},
-        })
-
-    if "meeting" in req.zones:
-        zones.append({
-            "zone_type": "meeting",
-            "x_mm": max(margin, width // 2 - 900),
-            "y_mm": max(1200, depth // 3),
-            "w_mm": 1800,
-            "d_mm": 1800,
-            "h_mm": 0,
-            "rules": {"chairs": 4},
-        })
-
-    if req.storage_required or "storage" in req.zones:
-        storage_w = min(1600, max(1200, width // 4))
-        storage_d = min(1800, max(1400, depth // 3))
-        zones.append({
-            "zone_type": "storage",
-            "x_mm": max(margin, width - storage_w - margin),
-            "y_mm": margin,
-            "w_mm": storage_w,
-            "d_mm": storage_d,
-            "h_mm": height,
-            "rules": {"closed": True},
-        })
-
-    if "display" in req.zones:
-        zones.append({
-            "zone_type": "display",
-            "x_mm": margin,
-            "y_mm": max(1500, depth - 1400),
-            "w_mm": max(2000, width - 2 * margin),
-            "d_mm": 900,
-            "h_mm": 2400,
-            "rules": {"screens": req.screens},
-        })
-
-    fascia_h = 500
-    backwall_h = min(3000, max(1800, height - 200))
-    backwall_w = max(2000, width - 60)
-    sidewall_d = max(1500, depth - 60)
-
-    panels.append({
-        "panel_code": "FAS-01",
-        "panel_type": "fascia_front",
-        "surface_ref": "/Booth/Fascia/Front",
-        "width_mm": width,
-        "height_mm": fascia_h,
-        "bleed_mm": 10,
-        "safe_margin_mm": 20,
-        "material": "vinyl",
-        "print_mode": "print",
-        "meta": {"position": "front"},
-    })
-
-    panels.append({
-        "panel_code": "BKW-01",
-        "panel_type": "backwall_center",
-        "surface_ref": "/Booth/Backwall/Center",
-        "width_mm": backwall_w,
-        "height_mm": backwall_h,
-        "bleed_mm": 10,
-        "safe_margin_mm": 20,
-        "material": "fabric",
-        "print_mode": "print",
-        "meta": {"position": "rear"},
-    })
-
-    if booth.get("open_sides", 3) <= 2:
-        panels.append({
-            "panel_code": "SDW-01",
-            "panel_type": "sidewall_left",
-            "surface_ref": "/Booth/Sidewall/Left",
-            "width_mm": sidewall_d,
-            "height_mm": backwall_h,
-            "bleed_mm": 10,
-            "safe_margin_mm": 20,
-            "material": "fabric",
-            "print_mode": "print",
-            "meta": {"position": "left"},
-        })
-
-    return {"zones": zones, "panels": panels}
-
-
-def save_layout(project_id: str, layout: dict[str, Any]) -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-
-    for zone in layout["zones"]:
-        cur.execute(
-            """
-            INSERT INTO zones (
-                id, project_id, zone_type, x_mm, y_mm, w_mm, d_mm, h_mm, rules_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()),
-                project_id,
-                zone["zone_type"],
-                zone["x_mm"],
-                zone["y_mm"],
-                zone["w_mm"],
-                zone["d_mm"],
-                zone["h_mm"],
-                json.dumps(zone.get("rules", {})),
-            ),
-        )
-
-    for panel in layout["panels"]:
-        cur.execute(
-            """
-            INSERT INTO panels (
-                id, project_id, panel_code, panel_type, surface_ref,
-                width_mm, height_mm, bleed_mm, safe_margin_mm,
-                material, print_mode, meta_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()),
-                project_id,
-                panel["panel_code"],
-                panel["panel_type"],
-                panel["surface_ref"],
-                panel["width_mm"],
-                panel["height_mm"],
-                panel["bleed_mm"],
-                panel["safe_margin_mm"],
-                panel.get("material"),
-                panel.get("print_mode", "print"),
-                json.dumps(panel.get("meta", {})),
-            ),
-        )
-
-    conn.commit()
-    conn.close()
-
+# =========================================================
+# PROJECT SNAPSHOT
+# =========================================================
 
 def get_project_full(project_id: str) -> dict[str, Any]:
+    project = fetch_project(project_id)
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
-    project = cur.fetchone()
-    if not project:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Project not found")
+    cur.execute("SELECT * FROM briefs WHERE project_id = ?", (project["id"],))
+    brief = cur.fetchone()
 
-    cur.execute("SELECT * FROM zones WHERE project_id = ?", (project_id,))
-    zones = cur.fetchall()
+    cur.execute("SELECT * FROM reference_images WHERE project_id = ? ORDER BY created_at DESC", (project["id"],))
+    refs = cur.fetchall()
 
-    cur.execute("SELECT * FROM panels WHERE project_id = ?", (project_id,))
-    panels = cur.fetchall()
-
-    cur.execute("SELECT * FROM brand_assets WHERE project_id = ?", (project_id,))
-    assets = cur.fetchall()
+    cur.execute("SELECT * FROM concepts WHERE project_id = ? ORDER BY concept_no ASC", (project["id"],))
+    concepts = cur.fetchall()
 
     cur.execute("""
-        SELECT * FROM panel_artworks
+        SELECT * FROM outputs
         WHERE project_id = ?
         ORDER BY created_at DESC
-    """, (project_id,))
-    artworks = cur.fetchall()
-
-    brand = None
-    if project["brand_id"]:
-        cur.execute("SELECT * FROM brands WHERE id = ?", (project["brand_id"],))
-        brand = cur.fetchone()
+    """, (project["id"],))
+    outputs = cur.fetchall()
 
     conn.close()
 
     return {
-        "project": {
-            "id": project["id"],
-            "name": project["name"],
-            "project_type": project["project_type"],
-            "status": project["status"],
-            "brand_id": project["brand_id"],
-            "booth": json.loads(project["booth_json"]),
-            "brief": json.loads(project["brief_json"]) if project["brief_json"] else None,
-            "created_at": project["created_at"],
-            "updated_at": project["updated_at"],
-        },
-        "brand": row_to_dict(brand) if brand else None,
-        "brand_assets": [
+        "project": dict(project),
+        "brief": json_load(brief["brief_json"], {}) if brief else None,
+        "reference_images": [dict(r) for r in refs],
+        "concepts": [
             {
-                **dict(a),
-                "meta": json.loads(a["meta_json"]) if a["meta_json"] else None,
+                **dict(c),
+                "materials": json_load(c["materials_json"], []),
+                "colors": json_load(c["colors_json"], []),
             }
-            for a in assets
+            for c in concepts
         ],
-        "zones": [
+        "outputs": [
             {
-                **dict(z),
-                "rules": json.loads(z["rules_json"]) if z["rules_json"] else {},
+                **dict(o),
+                "payload": json_load(o["payload_json"], {}),
             }
-            for z in zones
-        ],
-        "panels": [
-            {
-                **dict(p),
-                "meta": json.loads(p["meta_json"]) if p["meta_json"] else {},
-            }
-            for p in panels
-        ],
-        "artworks": [
-            {
-                **dict(a),
-                "payload": json.loads(a["payload_json"]) if a["payload_json"] else {},
-            }
-            for a in artworks
+            for o in outputs
         ],
     }
 
+# =========================================================
+# CONCEPT LOGIC
+# =========================================================
 
-def get_latest_brand_asset_for_project(project_id: str, asset_type: str = "logo") -> Optional[sqlite3.Row]:
+def get_concept_templates(project_type: str) -> list[dict[str, Any]]:
+    mapping = {
+        "exhibition_booth": [
+            {
+                "title": "Premium Tech Minimal",
+                "one_liner": "A sleek booth with sharp brand focus and clean premium lines.",
+                "design_story": "Minimal architecture, controlled lighting, sharp product storytelling, and a confident premium presence.",
+                "style_direction": "Clean, futuristic, premium, balanced branding",
+                "layout_direction": "Front reception, central interaction, side product display, hidden storage",
+                "materials": ["White laminate", "Backlit acrylic", "Black metal", "Wood texture accents"],
+                "colors": ["#0B1020", "#4F7CFF", "#FFFFFF", "#A7B8FF"],
+                "hero_visual": "Strong fascia branding with LED-lit rear feature wall",
+            },
+            {
+                "title": "Immersive Brand Experience",
+                "one_liner": "A bold experiential booth with strong visitor engagement moments.",
+                "design_story": "Layered spatial depth, immersive LED content, selfie moments, and a high-energy branded journey.",
+                "style_direction": "Immersive, bold, dynamic, attention-grabbing",
+                "layout_direction": "Open entry, central demo island, immersive rear screen, social interaction zone",
+                "materials": ["Printed fabric", "LED mesh", "Acrylic fins", "Matte vinyl"],
+                "colors": ["#101828", "#00C2FF", "#7A5AF8", "#FFFFFF"],
+                "hero_visual": "A dramatic hero entry with layered brand graphics and immersive light lines",
+            },
+            {
+                "title": "Elegant Corporate Luxury",
+                "one_liner": "A refined booth for premium brand perception and executive meetings.",
+                "design_story": "Warm materials, restrained branding, sophisticated lighting, and a mature premium hospitality feel.",
+                "style_direction": "Warm luxury, high-end, corporate, refined",
+                "layout_direction": "Formal reception, lounge-style meeting zone, premium brand backdrop, subtle product display",
+                "materials": ["Wood veneer", "Warm fabric", "Champagne metal", "Soft backlit panels"],
+                "colors": ["#1B1B1B", "#D6B98C", "#F5F0E8", "#5E4B3C"],
+                "hero_visual": "A warm branded backdrop with elegant hospitality-forward styling",
+            },
+        ],
+        "event_stage": [
+            {
+                "title": "Bold LED Keynote Stage",
+                "one_liner": "A modern keynote stage designed for launch impact and high visibility.",
+                "design_story": "Large LED story wall, confident stage wings, branded content hierarchy, and strong audience focus.",
+                "style_direction": "Modern launch, cinematic, high-tech, bold",
+                "layout_direction": "Wide center stage, rear LED, clean side wings, clear audience sightlines",
+                "materials": ["LED wall", "Matte stage deck", "Printed side wings", "Truss lighting"],
+                "colors": ["#0B1020", "#4F7CFF", "#FFFFFF", "#00D1FF"],
+                "hero_visual": "A wide LED stage with crisp front-facing brand presence and dramatic lighting",
+            },
+            {
+                "title": "Layered Premium Ceremony Stage",
+                "one_liner": "A premium layered stage with elegant depth and ceremony presence.",
+                "design_story": "Depth through layered scenic elements, premium lighting, elegant symmetry, and a polished event identity.",
+                "style_direction": "Premium, ceremonial, balanced, elegant",
+                "layout_direction": "Central stage platform, layered backdrop, side decorative elements, formal access stairs",
+                "materials": ["Printed scenic flats", "Fabric layers", "Warm light accents", "Gloss signage"],
+                "colors": ["#1E1E1E", "#D4AF7A", "#FFF7ED", "#7C5C36"],
+                "hero_visual": "A grand central stage with elegant layered scenic composition",
+            },
+            {
+                "title": "Immersive Launch Arena",
+                "one_liner": "An energetic stage concept built for product launches and media moments.",
+                "design_story": "High-energy geometry, graphic motion feel, strong brand transitions, and media-friendly backdrops.",
+                "style_direction": "Energetic, immersive, launch-focused, vibrant",
+                "layout_direction": "Center action zone, segmented LED wall, side branding towers, dramatic entry path",
+                "materials": ["LED panels", "Printed towers", "Floor vinyl", "Accent lighting"],
+                "colors": ["#111827", "#FF5D5D", "#FFD166", "#FFFFFF"],
+                "hero_visual": "A powerful launch stage with segmented lighting and media impact",
+            },
+        ],
+        "decor_zone": [
+            {
+                "title": "Photo-Op Statement Zone",
+                "one_liner": "A high-impact decor corner designed for social content and guest engagement.",
+                "design_story": "A signature decor moment with bold focal design, layered elements, and photogenic brand integration.",
+                "style_direction": "Photogenic, decorative, bold focal point",
+                "layout_direction": "Hero centerpiece, side decorative framing, guest standing zone, logo touchpoints",
+                "materials": ["Fabric drape", "Printed scenic panels", "Artificial florals", "Light accents"],
+                "colors": ["#0B1020", "#E9D5FF", "#FFFFFF", "#7C3AED"],
+                "hero_visual": "A decorative branded moment built for photography and sharing",
+            },
+            {
+                "title": "Luxury Lounge Decor",
+                "one_liner": "A premium decor zone with lounge mood and high-end hospitality character.",
+                "design_story": "Warm textures, premium decor accents, guest comfort, and sophisticated brand integration.",
+                "style_direction": "Luxury, warm, lounge, premium",
+                "layout_direction": "Soft seating zone, decorative rear wall, side accents, premium entry feel",
+                "materials": ["Velvet fabric", "Metal accents", "Wood finishes", "Ambient lighting"],
+                "colors": ["#201A17", "#C8A97E", "#F7F0E6", "#6A4B35"],
+                "hero_visual": "A warm, elegant decor environment with premium lounge styling",
+            },
+            {
+                "title": "Interactive Brand Corner",
+                "one_liner": "A decor-driven engagement corner blending atmosphere with brand discovery.",
+                "design_story": "Decor details plus interaction points, creating a memorable micro-experience inside the event.",
+                "style_direction": "Interactive, decorative, stylish, branded",
+                "layout_direction": "Branded centerpiece, interaction counter, decorative side build-ups, shareable moments",
+                "materials": ["Acrylic accents", "Graphic panels", "Decor props", "Spot lighting"],
+                "colors": ["#111827", "#14B8A6", "#FFFFFF", "#99F6E4"],
+                "hero_visual": "A decorative engagement corner with a stylish branded focal point",
+            },
+        ],
+        "backdrop": [
+            {
+                "title": "Minimal Media Wall",
+                "one_liner": "A clean backdrop for media, PR, and corporate photography.",
+                "design_story": "Simple but premium brand hierarchy, easy photography, and polished event presentation.",
+                "style_direction": "Minimal, branded, corporate, clean",
+                "layout_direction": "Straight feature wall, clear standing zone, centered brand composition",
+                "materials": ["Printed flex", "Fabric wall", "Simple frame structure", "Soft front lighting"],
+                "colors": ["#0B1020", "#FFFFFF", "#4F7CFF", "#CBD5E1"],
+                "hero_visual": "A sharp brand wall with clean alignment and elegant spacing",
+            },
+            {
+                "title": "Premium Step-and-Repeat",
+                "one_liner": "A structured premium media backdrop with sponsor and brand balance.",
+                "design_story": "An orderly but elegant media wall with strong co-branding logic and premium detailing.",
+                "style_direction": "Premium sponsor-friendly, balanced, formal",
+                "layout_direction": "Wide wall, sponsor grid, event title center, press photography zone",
+                "materials": ["Printed fabric", "Matte finish board", "Simple support frame", "Warm light wash"],
+                "colors": ["#111827", "#D6B98C", "#FFFFFF", "#6B7280"],
+                "hero_visual": "A formal media wall with premium sponsor presentation",
+            },
+            {
+                "title": "Layered Story Backdrop",
+                "one_liner": "A scenic branded backdrop with more depth and storytelling.",
+                "design_story": "Layered scenic forms, dimensional graphics, and richer visual storytelling than a flat media wall.",
+                "style_direction": "Scenic, layered, stylish, event-rich",
+                "layout_direction": "Main backdrop wall, dimensional side returns, hero message center",
+                "materials": ["Scenic printed panels", "Foam letters", "Accent lights", "Layered boards"],
+                "colors": ["#1F2937", "#F59E0B", "#FFFFFF", "#FDE68A"],
+                "hero_visual": "A layered event wall with depth and stronger design personality",
+            },
+        ],
+        "experience_area": [
+            {
+                "title": "Demo Journey Zone",
+                "one_liner": "A structured experience area guiding visitors through product discovery.",
+                "design_story": "Progressive journey design with clear touchpoints, brand immersion, and useful visitor flow.",
+                "style_direction": "Smart, guided, immersive, structured",
+                "layout_direction": "Entry touchpoint, demo path, content node, final engagement zone",
+                "materials": ["Graphic walls", "Demo counters", "LED content", "Vinyl floor path"],
+                "colors": ["#0B1020", "#4F7CFF", "#FFFFFF", "#22D3EE"],
+                "hero_visual": "A guided product discovery zone with modern branded structure",
+            },
+            {
+                "title": "Immersive Discovery Tunnel",
+                "one_liner": "A memorable branded environment that surrounds visitors with story and content.",
+                "design_story": "Layered structure, strong atmosphere, immersive brand storytelling, and media-ready visuals.",
+                "style_direction": "Immersive, atmospheric, futuristic, memorable",
+                "layout_direction": "Immersive entry, tunnel experience, central reveal moment, exit engagement zone",
+                "materials": ["Printed scenic walls", "Lighting strips", "LED inserts", "Reflective details"],
+                "colors": ["#111827", "#A855F7", "#FFFFFF", "#C4B5FD"],
+                "hero_visual": "A dramatic branded journey with immersive lighting and depth",
+            },
+            {
+                "title": "Warm Networking Experience",
+                "one_liner": "An experience-led area blending brand, interaction, and comfortable guest flow.",
+                "design_story": "A softer branded environment where conversation, product awareness, and visual quality coexist.",
+                "style_direction": "Warm, premium, social, hospitality-driven",
+                "layout_direction": "Welcome point, lounge seating, product touchpoint, subtle branded photo moment",
+                "materials": ["Wood textures", "Soft fabric", "Graphic panels", "Warm ambient lighting"],
+                "colors": ["#201A17", "#C08457", "#F8FAFC", "#7C2D12"],
+                "hero_visual": "A warm branded lounge-experience zone with premium social energy",
+            },
+        ],
+    }
+    return mapping.get(project_type, mapping["exhibition_booth"])
+
+def get_reference_rows(project_id: str) -> list[sqlite3.Row]:
+    project = fetch_project(project_id)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM brand_assets
-        WHERE project_id = ? AND asset_type = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (project_id, asset_type),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def next_artwork_version(panel_id: str) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COALESCE(MAX(version_no), 0) AS max_version FROM panel_artworks WHERE panel_id = ?",
-        (panel_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return int(row["max_version"]) + 1
-
-
-def wrap_text_for_svg(text: str, max_chars: int = 28) -> list[str]:
-    words = text.split()
-    if not words:
-        return [""]
-
-    lines = []
-    current = ""
-
-    for word in words:
-        test = word if not current else f"{current} {word}"
-        if len(test) <= max_chars:
-            current = test
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines[:4]
-
-
-def image_href_from_file(path_str: str) -> Optional[str]:
-    path = Path(path_str)
-    if not path.exists():
-        return None
-    ext = path.suffix.lower()
-    if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]:
-        return path.resolve().as_uri()
-    return None
-
-
-def generate_svg_artwork(
-    panel: sqlite3.Row,
-    project: sqlite3.Row,
-    payload: ArtworkGenerateRequest,
-    logo_asset: Optional[sqlite3.Row] = None,
-) -> str:
-    panel_w = int(panel["width_mm"])
-    panel_h = int(panel["height_mm"])
-    safe = int(panel["safe_margin_mm"])
-    bleed = int(panel["bleed_mm"])
-
-    bg_color = payload.bg_color
-    accent_color = payload.accent_color
-    text_color = payload.text_color
-
-    headline_lines = wrap_text_for_svg(payload.headline, max_chars=26 if panel_w < 3000 else 34)
-    sub_lines = wrap_text_for_svg(payload.subheadline, max_chars=40 if panel_w < 3000 else 52)
-
-    headline_svg = ""
-    start_y = max(180, panel_h * 0.28)
-    for i, line in enumerate(headline_lines):
-        headline_svg += (
-            f'<text x="{safe + 70}" y="{start_y + i * 100}" '
-            f'font-family="Arial, Helvetica, sans-serif" font-size="78" font-weight="700" '
-            f'fill="{html.escape(text_color)}">{html.escape(line)}</text>'
-        )
-
-    sub_svg = ""
-    sub_start_y = start_y + len(headline_lines) * 100 + 40
-    for i, line in enumerate(sub_lines):
-        sub_svg += (
-            f'<text x="{safe + 70}" y="{sub_start_y + i * 48}" '
-            f'font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="400" '
-            f'fill="{html.escape(text_color)}" opacity="0.92">{html.escape(line)}</text>'
-        )
-
-    cta_y = panel_h - safe - 120
-    qr_box_size = 180
-
-    logo_svg = ""
-    logo_x = panel_w - safe - 320
-    logo_y = safe + 40
-    logo_href = None
-
-    if logo_asset:
-        logo_href = image_href_from_file(logo_asset["file_url"])
-
-    if logo_href:
-        logo_svg = (
-            f'<image href="{html.escape(logo_href)}" '
-            f'x="{logo_x}" y="{logo_y}" width="240" height="120" preserveAspectRatio="xMidYMid meet" />'
-        )
-    else:
-        logo_svg = f"""
-        <rect x="{logo_x}" y="{logo_y}" width="240" height="120" rx="14" fill="none"
-              stroke="{html.escape(text_color)}" stroke-width="3" opacity="0.8"/>
-        <text x="{logo_x + 28}" y="{logo_y + 72}"
-              font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700"
-              fill="{html.escape(text_color)}">LOGO</text>
-        """
-
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{panel_w + bleed * 2}" height="{panel_h + bleed * 2}" viewBox="0 0 {panel_w + bleed * 2} {panel_h + bleed * 2}">
-  <defs>
-    <linearGradient id="bgGrad" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0%" stop-color="{html.escape(bg_color)}"/>
-      <stop offset="100%" stop-color="#111A36"/>
-    </linearGradient>
-    <linearGradient id="accentGrad" x1="0" x2="1" y1="0" y2="0">
-      <stop offset="0%" stop-color="{html.escape(accent_color)}"/>
-      <stop offset="100%" stop-color="#7FA2FF"/>
-    </linearGradient>
-  </defs>
-
-  <rect x="0" y="0" width="{panel_w + bleed * 2}" height="{panel_h + bleed * 2}" fill="#ffffff"/>
-  <rect x="{bleed}" y="{bleed}" width="{panel_w}" height="{panel_h}" fill="url(#bgGrad)"/>
-
-  <rect x="{bleed + safe}" y="{bleed + safe}" width="{panel_w - safe * 2}" height="{panel_h - safe * 2}"
-        fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2" stroke-dasharray="10 8"/>
-
-  <circle cx="{bleed + panel_w - 260}" cy="{bleed + 180}" r="220" fill="{html.escape(accent_color)}" opacity="0.13"/>
-  <circle cx="{bleed + 180}" cy="{bleed + panel_h - 140}" r="160" fill="{html.escape(accent_color)}" opacity="0.12"/>
-
-  <rect x="{bleed + safe + 70}" y="{bleed + 110}" width="180" height="12" rx="6" fill="url(#accentGrad)"/>
-
-  {logo_svg}
-
-  <g transform="translate({bleed}, {bleed})">
-    {headline_svg}
-    {sub_svg}
-  </g>
-
-  <g transform="translate({bleed}, {bleed})">
-    <rect x="{safe + 70}" y="{cta_y - 56}" width="{max(320, min(620, len(payload.cta) * 18 + 80))}" height="74"
-          rx="16" fill="{html.escape(accent_color)}"/>
-    <text x="{safe + 105}" y="{cta_y - 8}" font-family="Arial, Helvetica, sans-serif" font-size="30"
-          font-weight="700" fill="#ffffff">{html.escape(payload.cta)}</text>
-  </g>
-
-  <g transform="translate({bleed}, {bleed})">
-    <rect x="{panel_w - safe - qr_box_size - 70}" y="{panel_h - safe - qr_box_size - 30}"
-          width="{qr_box_size}" height="{qr_box_size}" rx="12" fill="#ffffff"/>
-    <rect x="{panel_w - safe - qr_box_size - 50}" y="{panel_h - safe - qr_box_size - 10}"
-          width="{qr_box_size - 40}" height="{qr_box_size - 40}" rx="8" fill="#f2f4f8" stroke="#d0d7e2"/>
-    <text x="{panel_w - safe - qr_box_size - 5}" y="{panel_h - safe - 48}"
-          font-family="Arial, Helvetica, sans-serif" font-size="20" text-anchor="end"
-          fill="{html.escape(text_color)}">QR</text>
-    <text x="{safe + 70}" y="{panel_h - safe - 22}"
-          font-family="Arial, Helvetica, sans-serif" font-size="20"
-          fill="{html.escape(text_color)}" opacity="0.7">{html.escape(project["name"])} • {html.escape(panel["panel_code"])}</text>
-  </g>
-</svg>
-"""
-    return svg
-
-
-def save_artwork_files(
-    project_id: str,
-    panel_id: str,
-    version_no: int,
-    svg_content: str,
-    payload_dict: dict[str, Any],
-) -> tuple[str, str, str]:
-    project_dir = ARTWORK_DIR / project_id / panel_id
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    svg_path = project_dir / f"v{version_no}.svg"
-    json_path = project_dir / f"v{version_no}.json"
-    preview_path = project_dir / f"v{version_no}_preview.svg"
-
-    svg_path.write_text(svg_content, encoding="utf-8")
-    json_path.write_text(json.dumps(payload_dict, indent=2), encoding="utf-8")
-    preview_path.write_text(svg_content, encoding="utf-8")
-
-    return str(svg_path), str(json_path), str(preview_path)
-
-
-def latest_artwork_for_panel(panel_id: str) -> Optional[sqlite3.Row]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM panel_artworks
-        WHERE panel_id = ?
-        ORDER BY version_no DESC
-        LIMIT 1
-        """,
-        (panel_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def get_all_panels_for_project(project_id: str) -> list[sqlite3.Row]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM panels WHERE project_id = ? ORDER BY panel_code", (project_id,))
+    cur.execute("SELECT * FROM reference_images WHERE project_id = ? ORDER BY created_at DESC", (project["id"],))
     rows = cur.fetchall()
     conn.close()
     return rows
 
+def build_concept_from_template(project: sqlite3.Row, brief: dict[str, Any], template: dict[str, Any], concept_no: int) -> dict[str, Any]:
+    brand = brief.get("brand_name", "Brand")
+    audience = brief.get("target_audience", "target audience")
+    goals = ", ".join(brief.get("goals", [])[:2]) or "brand visibility"
+    style_words = ", ".join(brief.get("style_keywords", [])[:3]) or template["style_direction"]
+    must_have = ", ".join(brief.get("must_have_zones", [])[:4]) or template["layout_direction"]
+
+    return {
+        "title": template["title"],
+        "one_liner": f"{template['one_liner']} Best suited for {audience}.",
+        "summary": f"{brand} concept focused on {goals} with a {style_words.lower()} visual language.",
+        "design_story": f"{template['design_story']} This concept is shaped for {brand} and tailored to the project brief.",
+        "style_direction": f"{template['style_direction']} | Brief influence: {style_words}",
+        "layout_direction": f"{template['layout_direction']} | Must-have zones: {must_have}",
+        "materials": template["materials"],
+        "colors": template["colors"],
+        "hero_visual": template["hero_visual"],
+        "concept_no": concept_no,
+    }
+
+def generate_concept_board_svg(project: sqlite3.Row, concept: dict[str, Any], refs: list[sqlite3.Row]) -> str:
+    width = 1600
+    height = 900
+    colors = concept["colors"][:4] if concept["colors"] else ["#0B1020", "#4F7CFF", "#FFFFFF", "#CBD5E1"]
+    ref_boxes = []
+    y_start = 500
+    x_positions = [70, 415, 760, 1105]
+
+    ref_labels = []
+    if refs:
+        for r in refs[:4]:
+            ref_labels.append(r["label"] or Path(r["file_path"]).name)
+    else:
+        ref_labels = [
+            "Suggested reference: lighting mood",
+            "Suggested reference: material finish",
+            "Suggested reference: branding surface",
+            "Suggested reference: hero angle",
+        ]
+
+    for i, label in enumerate(ref_labels):
+        ref_boxes.append(f"""
+        <rect x="{x_positions[i]}" y="{y_start}" width="280" height="220" rx="18" fill="#111827" stroke="#334155" />
+        <text x="{x_positions[i] + 20}" y="{y_start + 40}" fill="#E5E7EB" font-size="24" font-family="Arial" font-weight="700">Reference {i+1}</text>
+        <text x="{x_positions[i] + 20}" y="{y_start + 82}" fill="#CBD5E1" font-size="18" font-family="Arial">{safe_text(label)}</text>
+        <rect x="{x_positions[i] + 20}" y="{y_start + 110}" width="240" height="85" rx="12" fill="#1F2937" stroke="#475569" stroke-dasharray="8 6"/>
+        <text x="{x_positions[i] + 42}" y="{y_start + 158}" fill="#94A3B8" font-size="22" font-family="Arial">image slot</text>
+        """)
+
+    palette = "".join(
+        [f'<rect x="{70 + idx*80}" y="390" width="60" height="60" rx="10" fill="{safe_text(c)}" stroke="#ffffff"/>' for idx, c in enumerate(colors)]
+    )
+
+    materials = wrap_text(", ".join(concept["materials"]), 42)
+    materials_svg = "".join(
+        [f'<text x="760" y="{170 + i*34}" fill="#E2E8F0" font-size="24" font-family="Arial">{safe_text(line)}</text>' for i, line in enumerate(materials)]
+    )
+
+    summary_lines = wrap_text(concept["summary"], 55)
+    summary_svg = "".join(
+        [f'<text x="70" y="{180 + i*34}" fill="#CBD5E1" font-size="24" font-family="Arial">{safe_text(line)}</text>' for i, line in enumerate(summary_lines)]
+    )
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+    <defs>
+      <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+        <stop offset="0%" stop-color="{safe_text(colors[0])}"/>
+        <stop offset="100%" stop-color="#111827"/>
+      </linearGradient>
+    </defs>
+    <rect width="{width}" height="{height}" fill="url(#bg)"/>
+    <rect x="50" y="50" width="1500" height="800" rx="28" fill="rgba(15,23,42,0.72)" stroke="rgba(255,255,255,0.18)"/>
+    <text x="70" y="105" fill="#FFFFFF" font-size="46" font-family="Arial" font-weight="700">{safe_text(concept['title'])}</text>
+    <text x="70" y="145" fill="#93C5FD" font-size="26" font-family="Arial">{safe_text(project['name'])} • Concept {concept['concept_no']}</text>
+    {summary_svg}
+    <text x="760" y="120" fill="#FFFFFF" font-size="30" font-family="Arial" font-weight="700">Materials</text>
+    {materials_svg}
+    <text x="70" y="360" fill="#FFFFFF" font-size="30" font-family="Arial" font-weight="700">Color palette</text>
+    {palette}
+    <text x="760" y="390" fill="#FFFFFF" font-size="30" font-family="Arial" font-weight="700">Hero visual</text>
+    <text x="760" y="430" fill="#CBD5E1" font-size="24" font-family="Arial">{safe_text(concept['hero_visual'])}</text>
+    <text x="70" y="470" fill="#FFFFFF" font-size="30" font-family="Arial" font-weight="700">Reference images</text>
+    {''.join(ref_boxes)}
+    </svg>"""
+    return svg
+
+def clear_project_concepts(project_id: str) -> None:
+    project = fetch_project(project_id)
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM concepts WHERE project_id = ?", (project["id"],))
+    concept_rows = cur.fetchall()
+    for c in concept_rows:
+        cur.execute("DELETE FROM concept_reference_links WHERE concept_id = ?", (c["id"],))
+
+    cur.execute("DELETE FROM concepts WHERE project_id = ?", (project["id"],))
+    cur.execute("DELETE FROM outputs WHERE project_id = ?", (project["id"],))
+    cur.execute("UPDATE projects SET selected_concept_id = NULL, status = ?, updated_at = ? WHERE id = ?", ("brief_submitted", now_iso(), project["id"]))
+    conn.commit()
+    conn.close()
+
+def save_concept_board(project_id: str, concept_id: str, svg_content: str) -> str:
+    folder = CONCEPT_DIR / project_id / concept_id
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "board.svg"
+    path.write_text(svg_content, encoding="utf-8")
+    return str(path)
+
+# =========================================================
+# OUTPUT GENERATION
+# =========================================================
+
+def get_default_zones(project_type: str) -> list[str]:
+    mapping = {
+        "exhibition_booth": ["reception", "display", "meeting", "storage"],
+        "event_stage": ["main_stage", "led_wall", "side_wings", "podium", "control"],
+        "decor_zone": ["photo_op", "decor_feature", "lounge", "branding"],
+        "backdrop": ["backdrop_wall", "photo_lane", "sponsor_zone"],
+        "experience_area": ["entry", "demo", "interaction", "lounge", "brand_moment"],
+    }
+    return mapping.get(project_type, ["reception", "display", "meeting", "storage"])
+
+def build_layout_payload(project: sqlite3.Row, brief: dict[str, Any], concept: sqlite3.Row) -> dict[str, Any]:
+    width = brief["width_mm"]
+    depth = brief["depth_mm"]
+    height = brief["height_mm"]
+    zones = brief.get("must_have_zones") or get_default_zones(project["project_type"])
+
+    layout_items = []
+    margin = 200
+
+    if project["project_type"] == "event_stage":
+        layout_items = [
+            {"name": "main_stage", "x": 200, "y": 200, "w": width - 400, "d": max(1200, depth // 2)},
+            {"name": "led_wall", "x": 250, "y": 240, "w": width - 500, "d": 120},
+            {"name": "side_wings", "x": 200, "y": max(1500, depth // 2 + 150), "w": width - 400, "d": max(700, depth // 3)},
+        ]
+    elif project["project_type"] == "decor_zone":
+        layout_items = [
+            {"name": "photo_op", "x": 200, "y": 200, "w": width - 400, "d": max(1000, depth // 2)},
+            {"name": "lounge", "x": 300, "y": max(1400, depth // 2 + 100), "w": max(1500, width // 2), "d": max(800, depth // 3)},
+            {"name": "branding", "x": width - max(1400, width // 3) - 250, "y": max(1400, depth // 2 + 100), "w": max(1400, width // 3), "d": max(800, depth // 3)},
+        ]
+    else:
+        layout_items = [
+            {"name": zones[0] if len(zones) > 0 else "reception", "x": margin, "y": margin, "w": min(1800, width // 3), "d": 700},
+            {"name": zones[1] if len(zones) > 1 else "display", "x": margin, "y": max(1300, depth - 1200), "w": width - 2 * margin, "d": 900},
+            {"name": zones[2] if len(zones) > 2 else "meeting", "x": max(2400, width // 2 - 900), "y": max(1100, depth // 3), "w": 1800, "d": 1600},
+            {"name": zones[3] if len(zones) > 3 else "storage", "x": width - 1500 - margin, "y": margin, "w": 1500, "d": max(1200, depth // 3)},
+        ]
+
+    return {
+        "project_type": project["project_type"],
+        "width_mm": width,
+        "depth_mm": depth,
+        "height_mm": height,
+        "zones": layout_items,
+        "concept_title": concept["title"],
+    }
+
+def generate_layout_svg(project: sqlite3.Row, brief: dict[str, Any], concept: sqlite3.Row, payload: dict[str, Any]) -> str:
+    width_px = 1400
+    height_px = 900
+    real_w = payload["width_mm"]
+    real_d = payload["depth_mm"]
+    sx = width_px / max(real_w, 1)
+    sy = 650 / max(real_d, 1)
+
+    rects = []
+    for z in payload["zones"]:
+        x = 80 + z["x"] * sx
+        y = 140 + z["y"] * sy
+        w = z["w"] * sx
+        h = z["d"] * sy
+        rects.append(f"""
+        <rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="#1E293B" stroke="#60A5FA" stroke-width="3"/>
+        <text x="{x + 18}" y="{y + 34}" fill="#E5E7EB" font-size="22" font-family="Arial">{safe_text(z['name'])}</text>
+        """)
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width_px}" height="{height_px}" viewBox="0 0 {width_px} {height_px}">
+    <rect width="{width_px}" height="{height_px}" fill="#0B1020"/>
+    <text x="70" y="70" fill="#FFFFFF" font-size="40" font-family="Arial" font-weight="700">Layout Plan</text>
+    <text x="70" y="110" fill="#93C5FD" font-size="24" font-family="Arial">{safe_text(project['name'])} • {safe_text(concept['title'])}</text>
+    <rect x="80" y="140" width="{real_w * sx}" height="{real_d * sy}" fill="none" stroke="#CBD5E1" stroke-width="4"/>
+    {''.join(rects)}
+    <text x="80" y="{830}" fill="#CBD5E1" font-size="20" font-family="Arial">Overall size: {real_w}mm × {real_d}mm × {brief['height_mm']}mm</text>
+    </svg>"""
+
+def generate_creative_svg(project: sqlite3.Row, brief: dict[str, Any], concept: sqlite3.Row) -> str:
+    colors = json_load(concept["colors_json"], ["#0B1020", "#4F7CFF", "#FFFFFF"])
+    messages = brief.get("key_messages", [])[:3]
+    msg_svg = "".join(
+        [f'<text x="90" y="{350 + i*42}" fill="#CBD5E1" font-size="28" font-family="Arial">• {safe_text(m)}</text>' for i, m in enumerate(messages)]
+    ) or '<text x="90" y="350" fill="#CBD5E1" font-size="28" font-family="Arial">• Brand message space</text>'
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+    <rect width="1600" height="900" fill="{safe_text(colors[0])}"/>
+    <circle cx="1340" cy="180" r="220" fill="{safe_text(colors[1])}" opacity="0.18"/>
+    <rect x="70" y="70" width="1460" height="760" rx="28" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.18)"/>
+    <text x="90" y="140" fill="#FFFFFF" font-size="54" font-family="Arial" font-weight="700">{safe_text(brief['brand_name'])}</text>
+    <text x="90" y="200" fill="#93C5FD" font-size="34" font-family="Arial">{safe_text(concept['title'])}</text>
+    <text x="90" y="280" fill="#FFFFFF" font-size="72" font-family="Arial" font-weight="700">{safe_text(project['name'])}</text>
+    {msg_svg}
+    <rect x="90" y="700" width="340" height="76" rx="16" fill="{safe_text(colors[1])}"/>
+    <text x="130" y="748" fill="#FFFFFF" font-size="32" font-family="Arial" font-weight="700">Brand Call To Action</text>
+    </svg>"""
+
+def generate_preview_3d_svg(project: sqlite3.Row, brief: dict[str, Any], concept: sqlite3.Row) -> str:
+    colors = json_load(concept["colors_json"], ["#0B1020", "#4F7CFF", "#FFFFFF"])
+    title = concept["title"]
+
+    if project["project_type"] == "event_stage":
+        shape = f"""
+        <polygon points="220,650 1200,650 1100,430 320,430" fill="#182234" stroke="{safe_text(colors[1])}" stroke-width="4"/>
+        <rect x="420" y="220" width="520" height="180" rx="10" fill="{safe_text(colors[1])}" opacity="0.7"/>
+        <rect x="280" y="280" width="120" height="220" fill="#1F2937"/>
+        <rect x="960" y="280" width="120" height="220" fill="#1F2937"/>
+        """
+    elif project["project_type"] == "decor_zone":
+        shape = f"""
+        <ellipse cx="700" cy="650" rx="380" ry="90" fill="#111827"/>
+        <rect x="360" y="260" width="680" height="300" rx="34" fill="#182234" stroke="{safe_text(colors[1])}" stroke-width="4"/>
+        <circle cx="700" cy="360" r="110" fill="{safe_text(colors[1])}" opacity="0.35"/>
+        """
+    else:
+        shape = f"""
+        <polygon points="320,650 1020,650 1180,530 470,530" fill="#182234" stroke="{safe_text(colors[1])}" stroke-width="4"/>
+        <polygon points="470,530 1180,530 1180,250 470,250" fill="#1E293B" stroke="#93C5FD" stroke-width="4"/>
+        <polygon points="320,650 470,530 470,250 320,360" fill="#0F172A" stroke="#93C5FD" stroke-width="4"/>
+        """
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+    <rect width="1400" height="900" fill="#0B1020"/>
+    <text x="70" y="90" fill="#FFFFFF" font-size="46" font-family="Arial" font-weight="700">3D Preview Direction</text>
+    <text x="70" y="135" fill="#93C5FD" font-size="28" font-family="Arial">{safe_text(title)} • {safe_text(project['project_type'])}</text>
+    {shape}
+    <text x="70" y="820" fill="#CBD5E1" font-size="22" font-family="Arial">This version creates a preview direction sheet. Photoreal 3D rendering can be connected next.</text>
+    </svg>"""
+
+def generate_drawing_svg(project: sqlite3.Row, brief: dict[str, Any], concept: sqlite3.Row, layout_payload: dict[str, Any]) -> str:
+    lines = []
+    y = 170
+    details = [
+        f"Project: {project['name']}",
+        f"Project Type: {project['project_type']}",
+        f"Selected Concept: {concept['title']}",
+        f"Overall Size: {brief['width_mm']} x {brief['depth_mm']} x {brief['height_mm']} mm",
+        f"Budget Level: {brief.get('budget_level', '')}",
+        f"Style: {concept['style_direction']}",
+    ]
+    for d in details:
+        lines.append(f'<text x="80" y="{y}" fill="#E5E7EB" font-size="24" font-family="Arial">{safe_text(d)}</text>')
+        y += 40
+
+    zone_lines = []
+    y2 = 450
+    for z in layout_payload["zones"]:
+        zone_lines.append(
+            f'<text x="80" y="{y2}" fill="#CBD5E1" font-size="22" font-family="Arial">{safe_text(z["name"])}: {z["w"]} x {z["d"]} mm at ({z["x"]}, {z["y"]})</text>'
+        )
+        y2 += 34
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+    <rect width="1400" height="900" fill="#F8FAFC"/>
+    <rect x="40" y="40" width="1320" height="820" fill="white" stroke="#0F172A" stroke-width="3"/>
+    <text x="80" y="100" fill="#111827" font-size="42" font-family="Arial" font-weight="700">Production Drawing Summary</text>
+    {''.join(lines)}
+    <text x="80" y="400" fill="#111827" font-size="30" font-family="Arial" font-weight="700">Zone Schedule</text>
+    {''.join(zone_lines)}
+    <text x="80" y="820" fill="#334155" font-size="20" font-family="Arial">Generated from selected concept for production planning reference.</text>
+    </svg>"""
+
+def save_output_file(project_id: str, concept_id: str, filename: str, content: str) -> str:
+    folder = OUTPUT_DIR / project_id / concept_id
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / filename
+    path.write_text(content, encoding="utf-8")
+    return str(path)
+
+def create_output_record(project_id: str, concept_id: str, output_type: str, title: str, file_path: str, payload: dict[str, Any]) -> str:
+    output_id = str(uuid.uuid4())
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO outputs (id, project_id, concept_id, output_type, title, file_path, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (output_id, project_id, concept_id, output_type, title, file_path, json.dumps(payload), now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return output_id
 
 # =========================================================
 # ROUTES
@@ -751,42 +799,42 @@ def get_all_panels_for_project(project_id: str) -> list[sqlite3.Row]:
 @app.get("/")
 def root():
     return {
-        "message": "ExpoAI single-file backend is running",
+        "message": "ExpoAI concept-first backend is running",
         "docs": "/docs",
         "health": "/health",
     }
 
-
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": APP_NAME}
+    return {"status": "ok", "app": APP_NAME, "db_path": str(DB_PATH)}
 
+@app.get("/v1/debug/projects/{project_id}")
+def debug_project(project_id: str):
+    pid = normalize_id(project_id)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM projects ORDER BY created_at DESC")
+    rows = cur.fetchall()
+    conn.close()
+    return {
+        "requested": project_id,
+        "normalized": pid,
+        "all_project_ids": [r["id"] for r in rows],
+    }
 
 @app.post("/v1/projects")
 def create_project(payload: ProjectCreate):
     project_id = str(uuid.uuid4())
-    created_at = now_iso()
+    now = now_iso()
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO projects (
-            id, name, project_type, status, brand_id, booth_json,
-            brief_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO projects (id, name, project_type, status, selected_concept_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            project_id,
-            payload.name,
-            payload.project_type,
-            "draft",
-            None,
-            json.dumps(payload.booth.model_dump()),
-            json.dumps(payload.brief) if payload.brief else None,
-            created_at,
-            created_at,
-        ),
+        (project_id, payload.name, payload.project_type, "draft", None, now, now),
     )
     conn.commit()
     conn.close()
@@ -794,9 +842,8 @@ def create_project(payload: ProjectCreate):
     return {
         "message": "Project created successfully",
         "project_id": project_id,
-        "name": payload.name,
+        "project_type": payload.project_type,
     }
-
 
 @app.get("/v1/projects")
 def list_projects():
@@ -805,296 +852,415 @@ def list_projects():
     cur.execute("SELECT * FROM projects ORDER BY created_at DESC")
     rows = cur.fetchall()
     conn.close()
-
-    items = []
-    for row in rows:
-        items.append({
-            "id": row["id"],
-            "name": row["name"],
-            "project_type": row["project_type"],
-            "status": row["status"],
-            "brand_id": row["brand_id"],
-            "booth": json.loads(row["booth_json"]),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        })
-
-    return {"items": items}
-
+    return {"items": [dict(r) for r in rows]}
 
 @app.get("/v1/projects/{project_id}")
 def get_project(project_id: str):
     return get_project_full(project_id)
 
-
-@app.post("/v1/brands")
-def create_brand(payload: BrandCreate):
-    brand_id = str(uuid.uuid4())
-    created_at = now_iso()
+@app.post("/v1/projects/{project_id}/brief")
+def submit_brief(project_id: str, payload: BriefSubmit):
+    project = fetch_project(project_id)
+    brief_id = str(uuid.uuid4())
+    now = now_iso()
 
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
-        "INSERT INTO brands (id, name, lock_mode, created_at) VALUES (?, ?, ?, ?)",
-        (brand_id, payload.name, payload.lock_mode, created_at),
-    )
+    cur.execute("SELECT id FROM briefs WHERE project_id = ?", (project["id"],))
+    existing = cur.fetchone()
 
-    if payload.project_id:
-        cur.execute("SELECT id FROM projects WHERE id = ?", (payload.project_id,))
-        project = cur.fetchone()
-        if not project:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Project not found")
-
+    if existing:
         cur.execute(
-            "UPDATE projects SET brand_id = ?, updated_at = ? WHERE id = ?",
-            (brand_id, now_iso(), payload.project_id),
+            "UPDATE briefs SET brief_json = ?, updated_at = ? WHERE project_id = ?",
+            (json.dumps(payload.model_dump()), now, project["id"]),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO briefs (id, project_id, brief_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (brief_id, project["id"], json.dumps(payload.model_dump()), now, now),
         )
 
+    cur.execute(
+        "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+        ("brief_submitted", now, project["id"]),
+    )
     conn.commit()
     conn.close()
 
     return {
-        "message": "Brand created successfully",
-        "brand_id": brand_id,
-        "name": payload.name,
-        "project_id": payload.project_id,
+        "message": "Brief submitted successfully",
+        "project_id": project["id"],
+        "brief": payload.model_dump(),
     }
 
-
-@app.get("/v1/projects/{project_id}/brand")
-def get_project_brand(project_id: str):
-    project = fetch_project(project_id)
-
-    if not project["brand_id"]:
-        return {"brand": None, "assets": []}
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM brands WHERE id = ?", (project["brand_id"],))
-    brand = cur.fetchone()
-
-    cur.execute(
-        "SELECT * FROM brand_assets WHERE project_id = ? ORDER BY created_at DESC",
-        (project_id,),
-    )
-    assets = cur.fetchall()
-    conn.close()
-
-    return {
-        "brand": row_to_dict(brand),
-        "assets": [
-            {
-                **dict(a),
-                "meta": json.loads(a["meta_json"]) if a["meta_json"] else None,
-            }
-            for a in assets
-        ],
-    }
-
-
-@app.post("/v1/projects/{project_id}/brand-assets")
-async def upload_brand_asset(
+@app.post("/v1/projects/{project_id}/reference-images")
+async def upload_reference_image(
     project_id: str,
     file: UploadFile = File(...),
-    asset_type: str = Form("logo"),
-    meta_json: str = Form("{}"),
+    label: str = Form("Reference Image"),
+    notes: str = Form(""),
 ):
-    fetch_project(project_id)
-    brand_id = ensure_project_brand(project_id)
+    project = fetch_project(project_id)
 
-    project_dir = BRAND_ASSETS_DIR / project_id
-    project_dir.mkdir(parents=True, exist_ok=True)
+    folder = REFERENCE_DIR / project["id"]
+    folder.mkdir(parents=True, exist_ok=True)
 
     ext = Path(file.filename).suffix or ""
-    safe_name = f"{uuid.uuid4()}{ext}"
-    save_path = project_dir / safe_name
+    filename = f"{uuid.uuid4()}{ext}"
+    path = folder / filename
 
     content = await file.read()
-    with open(save_path, "wb") as f:
+    with open(path, "wb") as f:
         f.write(content)
 
-    asset_id = str(uuid.uuid4())
-    created_at = now_iso()
-
-    try:
-        parsed_meta = json.loads(meta_json) if meta_json else {}
-    except json.JSONDecodeError:
-        parsed_meta = {}
+    ref_id = str(uuid.uuid4())
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO brand_assets (
-            id, project_id, brand_id, asset_type, file_url, meta_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO reference_images (id, project_id, label, notes, file_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (
-            asset_id,
-            project_id,
-            brand_id,
-            asset_type,
-            str(save_path),
-            json.dumps(parsed_meta),
-            created_at,
-        ),
+        (ref_id, project["id"], label, notes, str(path), now_iso()),
     )
     conn.commit()
     conn.close()
 
     return {
-        "message": "Brand asset uploaded successfully",
-        "asset_id": asset_id,
-        "brand_id": brand_id,
-        "asset_type": asset_type,
-        "file_url": str(save_path),
+        "message": "Reference image uploaded successfully",
+        "reference_image_id": ref_id,
+        "project_id": project["id"],
+        "label": label,
+        "file_download_url": f"/v1/reference-images/{ref_id}/file",
     }
 
+@app.get("/v1/projects/{project_id}/reference-images")
+def list_reference_images(project_id: str):
+    refs = get_reference_rows(project_id)
+    return {
+        "items": [
+            {
+                **dict(r),
+                "file_download_url": f"/v1/reference-images/{r['id']}/file",
+            }
+            for r in refs
+        ]
+    }
 
-@app.post("/v1/projects/{project_id}/layout/generate")
-def generate_layout(project_id: str, payload: LayoutGenerateRequest):
+@app.get("/v1/reference-images/{reference_id}/file")
+def download_reference_image(reference_id: str):
+    ref = fetch_reference_image(reference_id)
+    if not os.path.exists(ref["file_path"]):
+        raise HTTPException(status_code=404, detail="Reference file not found")
+    return FileResponse(ref["file_path"], filename=Path(ref["file_path"]).name)
+
+@app.post("/v1/projects/{project_id}/concepts/generate")
+def generate_concepts(project_id: str):
     project = fetch_project(project_id)
-    booth = json.loads(project["booth_json"])
+    brief_row = fetch_brief(project["id"])
+    brief = json_load(brief_row["brief_json"], {})
+    refs = get_reference_rows(project["id"])
 
-    clear_old_layout(project_id)
-    layout = generate_layout_data(booth, payload)
-    save_layout(project_id, layout)
+    clear_project_concepts(project["id"])
+    templates = get_concept_templates(project["project_type"])
+
+    created = []
+    conn = get_conn()
+    cur = conn.cursor()
+
+    for idx, template in enumerate(templates, start=1):
+        concept = build_concept_from_template(project, brief, template, idx)
+        concept_id = str(uuid.uuid4())
+        board_svg = generate_concept_board_svg(project, concept, refs)
+        board_path = save_concept_board(project["id"], concept_id, board_svg)
+        now = now_iso()
+
+        cur.execute(
+            """
+            INSERT INTO concepts (
+                id, project_id, concept_no, title, one_liner, summary, design_story,
+                style_direction, layout_direction, materials_json, colors_json,
+                hero_visual, board_path, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                concept_id,
+                project["id"],
+                idx,
+                concept["title"],
+                concept["one_liner"],
+                concept["summary"],
+                concept["design_story"],
+                concept["style_direction"],
+                concept["layout_direction"],
+                json.dumps(concept["materials"]),
+                json.dumps(concept["colors"]),
+                concept["hero_visual"],
+                board_path,
+                "draft",
+                now,
+                now,
+            ),
+        )
+
+        for sort_order, ref in enumerate(refs[:4], start=1):
+            cur.execute(
+                """
+                INSERT INTO concept_reference_links (id, concept_id, reference_image_id, caption, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    concept_id,
+                    ref["id"],
+                    ref["label"] or f"Reference {sort_order}",
+                    sort_order,
+                ),
+            )
+
+        created.append({
+            "id": concept_id,
+            "concept_no": idx,
+            "title": concept["title"],
+            "one_liner": concept["one_liner"],
+            "summary": concept["summary"],
+            "board_url": f"/v1/concepts/{concept_id}/board",
+        })
+
+    cur.execute(
+        "UPDATE projects SET status = ?, updated_at = ?, selected_concept_id = NULL WHERE id = ?",
+        ("concepts_generated", now_iso(), project["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "message": "3 concepts generated successfully",
+        "project_id": project["id"],
+        "items": created,
+    }
+
+@app.get("/v1/projects/{project_id}/concepts")
+def list_concepts(project_id: str):
+    project = fetch_project(project_id)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM concepts WHERE project_id = ? ORDER BY concept_no ASC", (project["id"],))
+    rows = cur.fetchall()
+
+    result = []
+    for c in rows:
+        cur.execute("""
+            SELECT l.*, r.label, r.notes, r.file_path
+            FROM concept_reference_links l
+            JOIN reference_images r ON r.id = l.reference_image_id
+            WHERE l.concept_id = ?
+            ORDER BY l.sort_order ASC
+        """, (c["id"],))
+        linked_refs = cur.fetchall()
+
+        result.append({
+            **dict(c),
+            "materials": json_load(c["materials_json"], []),
+            "colors": json_load(c["colors_json"], []),
+            "board_url": f"/v1/concepts/{c['id']}/board",
+            "reference_images": [
+                {
+                    "reference_image_id": r["reference_image_id"],
+                    "label": r["label"],
+                    "notes": r["notes"],
+                    "file_download_url": f"/v1/reference-images/{r['reference_image_id']}/file",
+                }
+                for r in linked_refs
+            ],
+        })
+
+    conn.close()
+    return {"items": result}
+
+@app.get("/v1/concepts/{concept_id}")
+def get_concept(concept_id: str):
+    concept = fetch_concept(concept_id)
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT l.*, r.label, r.notes
+        FROM concept_reference_links l
+        JOIN reference_images r ON r.id = l.reference_image_id
+        WHERE l.concept_id = ?
+        ORDER BY l.sort_order ASC
+    """, (concept["id"],))
+    refs = cur.fetchall()
+    conn.close()
+
+    return {
+        **dict(concept),
+        "materials": json_load(concept["materials_json"], []),
+        "colors": json_load(concept["colors_json"], []),
+        "board_url": f"/v1/concepts/{concept['id']}/board",
+        "reference_images": [
+            {
+                "reference_image_id": r["reference_image_id"],
+                "label": r["label"],
+                "notes": r["notes"],
+                "file_download_url": f"/v1/reference-images/{r['reference_image_id']}/file",
+            }
+            for r in refs
+        ],
+    }
+
+@app.get("/v1/concepts/{concept_id}/board")
+def get_concept_board(concept_id: str):
+    concept = fetch_concept(concept_id)
+    if not os.path.exists(concept["board_path"]):
+        raise HTTPException(status_code=404, detail="Concept board file not found")
+    return FileResponse(concept["board_path"], media_type="image/svg+xml", filename=Path(concept["board_path"]).name)
+
+@app.patch("/v1/concepts/{concept_id}")
+def update_concept(concept_id: str, payload: ConceptUpdate):
+    concept = fetch_concept(concept_id)
+    project = fetch_project(concept["project_id"])
+    brief = json_load(fetch_brief(project["id"])["brief_json"], {})
+    refs = get_reference_rows(project["id"])
+
+    updated = {
+        "title": payload.title if payload.title is not None else concept["title"],
+        "one_liner": payload.one_liner if payload.one_liner is not None else concept["one_liner"],
+        "summary": payload.summary if payload.summary is not None else concept["summary"],
+        "design_story": payload.design_story if payload.design_story is not None else concept["design_story"],
+        "style_direction": payload.style_direction if payload.style_direction is not None else concept["style_direction"],
+        "layout_direction": payload.layout_direction if payload.layout_direction is not None else concept["layout_direction"],
+        "materials": payload.materials if payload.materials is not None else json_load(concept["materials_json"], []),
+        "colors": payload.colors if payload.colors is not None else json_load(concept["colors_json"], []),
+        "hero_visual": payload.hero_visual if payload.hero_visual is not None else concept["hero_visual"],
+        "concept_no": concept["concept_no"],
+    }
+
+    board_svg = generate_concept_board_svg(project, updated, refs)
+    board_path = save_concept_board(project["id"], concept["id"], board_svg)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE concepts
+        SET title = ?, one_liner = ?, summary = ?, design_story = ?, style_direction = ?,
+            layout_direction = ?, materials_json = ?, colors_json = ?, hero_visual = ?,
+            board_path = ?, status = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            updated["title"],
+            updated["one_liner"],
+            updated["summary"],
+            updated["design_story"],
+            updated["style_direction"],
+            updated["layout_direction"],
+            json.dumps(updated["materials"]),
+            json.dumps(updated["colors"]),
+            updated["hero_visual"],
+            board_path,
+            "edited",
+            now_iso(),
+            concept["id"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    return {"message": "Concept updated successfully", "concept_id": concept["id"]}
+
+@app.post("/v1/concepts/{concept_id}/select")
+def select_concept(concept_id: str):
+    concept = fetch_concept(concept_id)
+    project = fetch_project(concept["project_id"])
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE concepts SET status = 'rejected', updated_at = ? WHERE project_id = ?", (now_iso(), project["id"]))
+    cur.execute("UPDATE concepts SET status = 'selected', updated_at = ? WHERE id = ?", (now_iso(), concept["id"]))
+    cur.execute(
+        "UPDATE projects SET selected_concept_id = ?, status = ?, updated_at = ? WHERE id = ?",
+        (concept["id"], "concept_selected", now_iso(), project["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "message": "Concept selected successfully",
+        "project_id": project["id"],
+        "selected_concept_id": concept["id"],
+        "selected_concept_title": concept["title"],
+    }
+
+@app.post("/v1/projects/{project_id}/generate-all-from-selected-concept")
+def generate_all_from_selected_concept(project_id: str):
+    project = fetch_project(project_id)
+    brief = json_load(fetch_brief(project["id"])["brief_json"], {})
+    selected_id = project["selected_concept_id"]
+
+    if not selected_id:
+        raise HTTPException(status_code=400, detail="No selected concept for this project")
+
+    concept = fetch_concept(selected_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM outputs WHERE project_id = ?", (project["id"],))
+    conn.commit()
+    conn.close()
+
+    layout_payload = build_layout_payload(project, brief, concept)
+
+    layout_svg = generate_layout_svg(project, brief, concept, layout_payload)
+    creative_svg = generate_creative_svg(project, brief, concept)
+    preview_svg = generate_preview_3d_svg(project, brief, concept)
+    drawing_svg = generate_drawing_svg(project, brief, concept, layout_payload)
+
+    layout_path = save_output_file(project["id"], concept["id"], "layout_plan.svg", layout_svg)
+    creative_path = save_output_file(project["id"], concept["id"], "creative_2d.svg", creative_svg)
+    preview_path = save_output_file(project["id"], concept["id"], "preview_3d.svg", preview_svg)
+    drawing_path = save_output_file(project["id"], concept["id"], "production_drawing.svg", drawing_svg)
+
+    out1 = create_output_record(project["id"], concept["id"], "layout_plan", "Layout Plan", layout_path, layout_payload)
+    out2 = create_output_record(project["id"], concept["id"], "creative_2d", "2D Creative", creative_path, {"concept_title": concept["title"]})
+    out3 = create_output_record(project["id"], concept["id"], "preview_3d", "3D Preview Direction", preview_path, {"concept_title": concept["title"]})
+    out4 = create_output_record(project["id"], concept["id"], "production_drawing", "Production Drawing Summary", drawing_path, layout_payload)
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
-        ("layout_generated", now_iso(), project_id),
+        ("final_package_ready", now_iso(), project["id"]),
     )
     conn.commit()
     conn.close()
 
     return {
-        "message": "Layout generated successfully",
-        "project_id": project_id,
-        "booth": booth,
-        "zones": layout["zones"],
-        "panels": layout["panels"],
+        "message": "Final outputs generated from selected concept",
+        "project_id": project["id"],
+        "selected_concept_id": concept["id"],
+        "outputs": [
+            {"output_id": out1, "type": "layout_plan", "file_url": f"/v1/outputs/{out1}/file"},
+            {"output_id": out2, "type": "creative_2d", "file_url": f"/v1/outputs/{out2}/file"},
+            {"output_id": out3, "type": "preview_3d", "file_url": f"/v1/outputs/{out3}/file"},
+            {"output_id": out4, "type": "production_drawing", "file_url": f"/v1/outputs/{out4}/file"},
+        ],
     }
 
-
-@app.get("/v1/projects/{project_id}/panels")
-def list_project_panels(project_id: str):
-    fetch_project(project_id)
-    panels = get_all_panels_for_project(project_id)
-    return {
-        "items": [
-            {
-                **dict(p),
-                "meta": json.loads(p["meta_json"]) if p["meta_json"] else {},
-            }
-            for p in panels
-        ]
-    }
-
-
-@app.post("/v1/panels/{panel_id}/artwork/generate")
-def generate_panel_artwork(panel_id: str, payload: ArtworkGenerateRequest):
-    panel = fetch_panel(panel_id)
-
+@app.get("/v1/projects/{project_id}/outputs")
+def list_project_outputs(project_id: str):
+    project = fetch_project(project_id)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM projects WHERE id = ?", (panel["project_id"],))
-    project = cur.fetchone()
-    conn.close()
-
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found for this panel")
-
-    logo_asset = get_latest_brand_asset_for_project(panel["project_id"], "logo")
-
-    version_no = next_artwork_version(panel_id)
-    svg_content = generate_svg_artwork(panel, project, payload, logo_asset=logo_asset)
-
-    payload_dict = payload.model_dump()
-    payload_dict["panel_id"] = panel_id
-    payload_dict["panel_code"] = panel["panel_code"]
-    payload_dict["panel_type"] = panel["panel_type"]
-    payload_dict["panel_size"] = {
-        "width_mm": panel["width_mm"],
-        "height_mm": panel["height_mm"],
-        "bleed_mm": panel["bleed_mm"],
-        "safe_margin_mm": panel["safe_margin_mm"],
-    }
-
-    svg_path, json_path, preview_path = save_artwork_files(
-        project["id"], panel_id, version_no, svg_content, payload_dict
-    )
-
-    artwork_id = str(uuid.uuid4())
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO panel_artworks (
-            id, panel_id, project_id, version_no,
-            headline, subheadline, cta, qr_url, style_hint,
-            bg_color, accent_color, text_color,
-            svg_path, json_path, preview_path, payload_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            artwork_id,
-            panel_id,
-            project["id"],
-            version_no,
-            payload.headline,
-            payload.subheadline,
-            payload.cta,
-            payload.qr_url,
-            payload.style_hint,
-            payload.bg_color,
-            payload.accent_color,
-            payload.text_color,
-            svg_path,
-            json_path,
-            preview_path,
-            json.dumps(payload_dict),
-            now_iso(),
-        ),
-    )
-    cur.execute(
-        "UPDATE projects SET updated_at = ?, status = ? WHERE id = ?",
-        (now_iso(), "artwork_generated", project["id"]),
-    )
-    conn.commit()
-    conn.close()
-
-    return {
-        "message": "Artwork generated successfully",
-        "artwork_id": artwork_id,
-        "panel_id": panel_id,
-        "panel_code": panel["panel_code"],
-        "version_no": version_no,
-        "svg_download_url": f"/v1/panels/{panel_id}/artwork/latest/svg",
-        "json_download_url": f"/v1/panels/{panel_id}/artwork/latest/json",
-        "preview_url": f"/v1/panels/{panel_id}/artwork/latest/preview",
-    }
-
-
-@app.get("/v1/panels/{panel_id}/artwork")
-def list_panel_artworks(panel_id: str):
-    fetch_panel(panel_id)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM panel_artworks
-        WHERE panel_id = ?
-        ORDER BY version_no DESC
-        """,
-        (panel_id,),
-    )
+    cur.execute("SELECT * FROM outputs WHERE project_id = ? ORDER BY created_at DESC", (project["id"],))
     rows = cur.fetchall()
     conn.close()
 
@@ -1102,103 +1268,27 @@ def list_panel_artworks(panel_id: str):
         "items": [
             {
                 **dict(r),
-                "payload": json.loads(r["payload_json"]) if r["payload_json"] else {},
+                "payload": json_load(r["payload_json"], {}),
+                "file_url": f"/v1/outputs/{r['id']}/file",
             }
             for r in rows
         ]
     }
 
+@app.get("/v1/outputs/{output_id}/file")
+def download_output_file(output_id: str):
+    output = fetch_output(output_id)
+    if not os.path.exists(output["file_path"]):
+        raise HTTPException(status_code=404, detail="Output file not found")
 
-@app.get("/v1/panels/{panel_id}/artwork/latest")
-def get_latest_panel_artwork(panel_id: str):
-    row = latest_artwork_for_panel(panel_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="No artwork found for this panel")
+    suffix = Path(output["file_path"]).suffix.lower()
+    media_type = "application/octet-stream"
+    if suffix == ".svg":
+        media_type = "image/svg+xml"
+    elif suffix == ".json":
+        media_type = "application/json"
 
-    return {
-        **dict(row),
-        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
-    }
-
-
-@app.get("/v1/panels/{panel_id}/artwork/latest/svg")
-def download_latest_panel_svg(panel_id: str):
-    row = latest_artwork_for_panel(panel_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="No artwork found for this panel")
-
-    svg_path = row["svg_path"]
-    if not os.path.exists(svg_path):
-        raise HTTPException(status_code=404, detail="SVG file not found")
-
-    return FileResponse(
-        svg_path,
-        media_type="image/svg+xml",
-        filename=Path(svg_path).name,
-    )
-
-
-@app.get("/v1/panels/{panel_id}/artwork/latest/preview")
-def preview_latest_panel_svg(panel_id: str):
-    row = latest_artwork_for_panel(panel_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="No artwork found for this panel")
-
-    preview_path = row["preview_path"]
-    if not os.path.exists(preview_path):
-        raise HTTPException(status_code=404, detail="Preview file not found")
-
-    return FileResponse(
-        preview_path,
-        media_type="image/svg+xml",
-        filename=Path(preview_path).name,
-    )
-
-
-@app.get("/v1/panels/{panel_id}/artwork/latest/json")
-def download_latest_panel_json(panel_id: str):
-    row = latest_artwork_for_panel(panel_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="No artwork found for this panel")
-
-    json_path = row["json_path"]
-    if not os.path.exists(json_path):
-        raise HTTPException(status_code=404, detail="JSON file not found")
-
-    return FileResponse(
-        json_path,
-        media_type="application/json",
-        filename=Path(json_path).name,
-    )
-
-
-@app.get("/v1/projects/{project_id}/artworks")
-def list_project_artworks(project_id: str):
-    fetch_project(project_id)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM panel_artworks
-        WHERE project_id = ?
-        ORDER BY created_at DESC
-        """,
-        (project_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    return {
-        "items": [
-            {
-                **dict(r),
-                "payload": json.loads(r["payload_json"]) if r["payload_json"] else {},
-            }
-            for r in rows
-        ]
-    }
-
+    return FileResponse(output["file_path"], media_type=media_type, filename=Path(output["file_path"]).name)
 
 # =========================================================
 # LOCAL RUN
