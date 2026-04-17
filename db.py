@@ -1,0 +1,4 @@
+PROJECTS = {}
+BRIEFS = {}
+CONCEPTS = {}
+OUTPUTS = {}
