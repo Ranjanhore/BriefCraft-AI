@@ -1,33 +1,23 @@
 from openai import OpenAI
 import os
-import json
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def generate_concepts(brief: str):
+def chat_with_ai(messages):
 
-    prompt = f"""
-    You are an expert exhibition booth designer.
+    system_prompt = """
+    You are an expert AI Exhibition & Event Design Assistant.
 
-    Create 3 concepts from this brief:
-
-    {brief}
-
-    Return JSON:
-    [
-      {{
-        "title": "",
-        "one_liner": "",
-        "style": "",
-        "zones": [],
-        "visual_prompt": ""
-      }}
-    ]
+    You must:
+    - Ask clarifying questions if brief is incomplete
+    - Request missing assets (logo, layout, references)
+    - Guide user step-by-step
+    - Output structured design direction
     """
 
-    res = client.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "system", "content": system_prompt}] + messages
     )
 
-    return json.loads(res.choices[0].message.content)
+    return response.choices[0].message.content
