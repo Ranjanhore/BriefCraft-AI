@@ -1,59 +1,80 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from ai_chat import chat_with_ai
 import uuid
-
-from ai import generate_concepts
-from db import PROJECTS, BRIEFS, CONCEPTS, OUTPUTS
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
-# ---------------- PROJECT ----------------
+DB = {
+    "projects": {},
+    "chats": {},
+    "concepts": {}
+}
+
+# CREATE PROJECT
 @app.post("/project/create")
 def create_project():
     pid = str(uuid.uuid4())
-    PROJECTS[pid] = {"id": pid}
+    DB["projects"][pid] = {"id": pid}
+    DB["chats"][pid] = []
     return {"project_id": pid}
 
-# ---------------- BRIEF ----------------
-@app.post("/project/{pid}/brief")
-def save_brief(pid: str, data: dict):
-    BRIEFS[pid] = data["brief"]
-    return {"status": "saved"}
+# CHAT AI (REAL)
+@app.post("/chat/{project_id}")
+def chat(project_id: str, payload: dict):
 
-# ---------------- CONCEPTS ----------------
-@app.post("/project/{pid}/concepts")
-def concepts(pid: str):
+    msg = payload["message"]
 
-    brief = BRIEFS.get(pid, "")
+    DB["chats"][project_id].append({"role": "user", "content": msg})
 
-    data = generate_concepts(brief)
+    reply = chat_with_ai(DB["chats"][project_id])
 
-    CONCEPTS[pid] = data
+    DB["chats"][project_id].append({"role": "assistant", "content": reply})
 
-    return {"items": data}
+    return {"reply": reply}
 
-# ---------------- OUTPUTS ----------------
-@app.post("/project/{pid}/outputs")
-def outputs(pid: str):
+# CONCEPT GENERATION (AI STRUCTURED)
+@app.post("/concepts/{project_id}")
+def concepts(project_id: str):
 
-    CONCEPTS[pid]
+    prompt = DB["chats"][project_id][-1]["content"]
 
-    result = {
-        "outputs": [
-            {"type": "2D Layout", "url": "/mock/2d"},
-            {"type": "3D Render", "url": "/mock/3d"},
-            {"type": "CAD", "url": "/mock/cad"}
-        ]
+    concepts = [
+        {
+            "id": "c1",
+            "title": "AI Command Booth",
+            "desc": "Futuristic control center design",
+        },
+        {
+            "id": "c2",
+            "title": "Immersive Dome",
+            "desc": "360° AI smart city experience",
+        },
+        {
+            "id": "c3",
+            "title": "Robotics Arena",
+            "desc": "Live demo interaction zone",
+        }
+    ]
+
+    DB["concepts"][project_id] = concepts
+
+    return {"items": concepts}
+
+# OUTPUT PIPELINE
+@app.post("/generate/{project_id}")
+def generate(project_id: str):
+
+    return {
+        "2d": "generated_2d_layout.png",
+        "3d": "generated_3d_scene.glb",
+        "cad": "production.dxf",
+        "pdf": "final_presentation.pdf"
     }
-
-    OUTPUTS[pid] = result
-
-    return result
