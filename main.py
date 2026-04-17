@@ -1,68 +1,89 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import List
 from openai import OpenAI
 import os
 
 app = FastAPI()
 
+# 🔑 SET YOUR KEY
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-class Brief(BaseModel):
-    text: str
+# -----------------------
+# MODELS
+# -----------------------
+class ChatRequest(BaseModel):
+    message: str
 
+class BriefRequest(BaseModel):
+    brief: str
 
+class Concept(BaseModel):
+    title: str
+    description: str
+
+# -----------------------
+# HEALTH
+# -----------------------
 @app.get("/")
-def home():
-    return {"status": "AI Studio Engine Running"}
+def root():
+    return {"message": "AI Creative Studio Backend Running"}
 
+# -----------------------
+# CHAT API
+# -----------------------
+@app.post("/chat")
+def chat(req: ChatRequest):
+    response = client.chat.completions.create(
+        model="gpt-5.3",
+        messages=[
+            {"role": "system", "content": "You are a creative AI assistant for event, booth and stage design."},
+            {"role": "user", "content": req.message}
+        ]
+    )
 
+    return {"reply": response.choices[0].message.content}
+
+# -----------------------
+# GENERATE CONCEPTS
+# -----------------------
 @app.post("/generate-concepts")
-def generate_concepts(data: Brief):
+def generate_concepts(req: BriefRequest):
 
     prompt = f"""
-You are an expert exhibition designer AI.
+    Convert this creative brief into 3 unique high-quality design concepts.
 
-Convert this brief into 3 design concepts:
+    Brief:
+    {req.brief}
 
-Brief:
-{data.text}
+    Return:
+    - Concept Name
+    - Short Description
+    """
 
-Return JSON:
-[
-  {{
-    "title": "",
-    "description": "",
-    "style": "",
-    "layout_idea": ""
-  }}
-]
-"""
-
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = client.chat.completions.create(
+        model="gpt-5.3",
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return {"concepts": res.choices[0].message.content}
+    return {"concepts": response.choices[0].message.content}
 
+# -----------------------
+# NEXT STEPS PLACEHOLDERS
+# -----------------------
 
-@app.post("/generate-image-prompt")
-def image_prompt(data: dict):
+@app.post("/generate-cad")
+def cad():
+    return {"status": "CAD layout generated"}
 
-    concept = data.get("concept")
+@app.post("/generate-2d")
+def two_d():
+    return {"status": "2D graphics generated"}
 
-    prompt = f"""
-Convert this concept into a hyper realistic 3D render prompt:
+@app.post("/generate-3d")
+def three_d():
+    return {"status": "3D render generated"}
 
-Concept:
-{concept}
-
-Return only image prompt for AI rendering.
-"""
-
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return {"prompt": res.choices[0].message.content}
+@app.post("/generate-production")
+def production():
+    return {"status": "Production drawings ready"}
