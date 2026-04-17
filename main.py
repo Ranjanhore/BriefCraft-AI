@@ -1,223 +1,118 @@
-# =========================
-# AI CREATIVE STUDIO - MAIN
-# =========================
-
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Optional, Dict
 from openai import OpenAI
 import os
 
+# -------------------------
+# APP SETUP
+# -------------------------
 app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# =========================
-# MODELS
-# =========================
+# -------------------------
+# INPUT MODEL
+# -------------------------
+class Input(BaseModel):
+    text: str
 
-class UserInput(BaseModel):
-    input: str
+# -------------------------
+# LLM BRAIN
+# -------------------------
+CREATIVE_BRAIN = """
+You are an elite creative AI studio.
 
-class SelectConcept(BaseModel):
-    concept_index: int
+You specialize in:
+- event design
+- exhibition booths
+- stage design
 
+Think like:
+- creative director
+- spatial designer
 
-# =========================
-# PROJECT STATE (MEMORY)
-# =========================
+Always give:
+- premium ideas
+- structured outputs
+"""
 
-class ProjectState:
-    def __init__(self):
-        self.brief: Optional[str] = None
-        self.analysis: Optional[str] = None
-        self.concepts: Optional[str] = None
-        self.selected_concept: Optional[str] = None
-        self.layout: Optional[str] = None
-        self.graphics: Optional[str] = None
-        self.render: Optional[str] = None
-        self.production: Optional[str] = None
-
-
-# =========================
-# BASE LLM CALL
-# =========================
-
-def llm(prompt):
+def llm(user_input):
     res = client.chat.completions.create(
         model="gpt-5.3",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {"role": "system", "content": CREATIVE_BRAIN},
+            {"role": "user", "content": user_input}
+        ],
+        temperature=0.7
     )
     return res.choices[0].message.content
 
+# -------------------------
+# STATE (VERY SIMPLE MEMORY)
+# -------------------------
+state = {
+    "brief": None,
+    "analysis": None,
+    "concepts": None
+}
 
-# =========================
-# AGENTS
-# =========================
+# -------------------------
+# AGENTS (SIMPLE)
+# -------------------------
+def analysis_agent(brief):
+    return llm(f"""
+Analyze this brief:
 
-class AnalysisAgent:
-    def run(self, brief):
-        prompt = f"""
-        You are a senior creative strategist.
+{brief}
 
-        Analyze this brief:
-        {brief}
+Give:
+- Audience
+- Goal
+- Tone
+- Key requirements
+""")
 
-        Output:
-        - Audience
-        - Goal
-        - Tone
-        - Constraints
-        """
-        return llm(prompt)
+def concept_agent(analysis):
+    return llm(f"""
+Based on this:
 
+{analysis}
 
-class ConceptAgent:
-    def run(self, analysis):
-        prompt = f"""
-        Based on this analysis:
+Create 3 creative concepts.
 
-        {analysis}
+Each with:
+- Name
+- Idea
+- Experience
+""")
 
-        Create 3 high-end creative concepts.
-
-        Each should include:
-        - Name
-        - Theme
-        - Short description
-        """
-        return llm(prompt)
-
-
-class LayoutAgent:
-    def run(self, concept):
-        prompt = f"""
-        Create spatial CAD layout plan for:
-
-        {concept}
-
-        Include:
-        - Zones
-        - Visitor flow
-        - Dimensions
-        """
-        return llm(prompt)
-
-
-class GraphicsAgent:
-    def run(self, concept):
-        prompt = f"""
-        Create 2D graphics plan for:
-
-        {concept}
-
-        Include:
-        - LED content
-        - Branding panels
-        """
-        return llm(prompt)
-
-
-class RenderAgent:
-    def run(self, concept):
-        prompt = f"""
-        Create ultra-realistic 3D render prompts for:
-
-        {concept}
-
-        Include:
-        - Camera angle
-        - Lighting
-        - Materials
-        """
-        return llm(prompt)
-
-
-class ProductionAgent:
-    def run(self, concept):
-        prompt = f"""
-        Create production drawings and execution plan for:
-
-        {concept}
-
-        Include:
-        - Materials
-        - Fabrication
-        """
-        return llm(prompt)
-
-
-# =========================
+# -------------------------
 # ORCHESTRATOR
-# =========================
-
-class Orchestrator:
-
-    def __init__(self):
-        self.state = ProjectState()
-
-        self.analysis_agent = AnalysisAgent()
-        self.concept_agent = ConceptAgent()
-        self.layout_agent = LayoutAgent()
-        self.graphics_agent = GraphicsAgent()
-        self.render_agent = RenderAgent()
-        self.production_agent = ProductionAgent()
-
-    def run(self, user_input):
-
-        # STEP 1: STORE BRIEF
-        if not self.state.brief:
-            self.state.brief = user_input
-
-        # STEP 2: ANALYSIS
-        if not self.state.analysis:
-            self.state.analysis = self.analysis_agent.run(self.state.brief)
-            return {"stage": "analysis", "data": self.state.analysis}
-
-        # STEP 3: CONCEPTS
-        if not self.state.concepts:
-            self.state.concepts = self.concept_agent.run(self.state.analysis)
-            return {"stage": "concepts", "data": self.state.concepts}
-
-        # WAIT FOR USER SELECTION
-        if not self.state.selected_concept:
-            return {"stage": "select_concept", "data": self.state.concepts}
-
-        # STEP 4: LAYOUT
-        if not self.state.layout:
-            self.state.layout = self.layout_agent.run(self.state.selected_concept)
-            return {"stage": "layout", "data": self.state.layout}
-
-        # STEP 5: GRAPHICS
-        if not self.state.graphics:
-            self.state.graphics = self.graphics_agent.run(self.state.selected_concept)
-            return {"stage": "graphics", "data": self.state.graphics}
-
-        # STEP 6: RENDER
-        if not self.state.render:
-            self.state.render = self.render_agent.run(self.state.selected_concept)
-            return {"stage": "render", "data": self.state.render}
-
-        # STEP 7: PRODUCTION
-        if not self.state.production:
-            self.state.production = self.production_agent.run(self.state.selected_concept)
-            return {"stage": "production", "data": self.state.production}
-
-        return {"stage": "complete", "data": "Project fully generated"}
-
-
-orch = Orchestrator()
-
-
-# =========================
-# API ROUTES
-# =========================
-
+# -------------------------
 @app.post("/run")
-def run_agent(req: UserInput):
-    return orch.run(req.input)
+def run(data: Input):
 
+    # Step 1: Save brief
+    if not state["brief"]:
+        state["brief"] = data.text
 
-@app.post("/select-concept")
-def select_concept(req: SelectConcept):
-    orch.state.selected_concept = f"Concept {req.concept_index + 1}"
-    return {"status": "concept selected"}
+    # Step 2: Analysis
+    if not state["analysis"]:
+        state["analysis"] = analysis_agent(state["brief"])
+        return {
+            "stage": "analysis",
+            "data": state["analysis"]
+        }
+
+    # Step 3: Concepts
+    if not state["concepts"]:
+        state["concepts"] = concept_agent(state["analysis"])
+        return {
+            "stage": "concepts",
+            "data": state["concepts"]
+        }
+
+    # Final
+    return {
+        "stage": "done",
+        "data": "Workflow complete"
+    }
