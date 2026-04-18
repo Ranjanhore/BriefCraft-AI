@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
-from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from jose import jwt
 from passlib.context import CryptContext
@@ -17,24 +16,34 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 DB_URL = os.getenv("DATABASE_URL")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-if not OPENAI_KEY:
-    raise Exception("Missing OPENAI_API_KEY")
-if not DB_URL:
-    raise Exception("Missing DATABASE_URL")
-if not SECRET_KEY:
-    raise Exception("Missing SECRET_KEY")
+print("App starting...")
+print("OPENAI:", bool(OPENAI_KEY))
+print("DB:", bool(DB_URL))
+print("SECRET:", bool(SECRET_KEY))
 
 # -------------------------
 # APP INIT
 # -------------------------
 app = FastAPI()
-client = OpenAI(api_key=OPENAI_KEY)
 
 # -------------------------
-# DB CONNECTION (FIXED SSL)
+# SAFE CLIENT INIT
 # -------------------------
-conn = psycopg2.connect(DB_URL, sslmode='require')
-conn.autocommit = True
+client = None
+if OPENAI_KEY:
+    client = OpenAI(api_key=OPENAI_KEY)
+
+# -------------------------
+# SAFE DB CONNECTION
+# -------------------------
+conn = None
+if DB_URL:
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        conn.autocommit = True
+        print("DB connected")
+    except Exception as e:
+        print("DB connection failed:", e)
 
 # -------------------------
 # AUTH
@@ -48,6 +57,9 @@ def verify_password(password, hashed):
     return pwd_context.verify(password, hashed)
 
 def create_token(user_id):
+    if not SECRET_KEY:
+        raise HTTPException(500, "SECRET_KEY missing")
+
     payload = {
         "user_id": user_id,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
@@ -55,11 +67,14 @@ def create_token(user_id):
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 def get_user_from_token(token):
+    if not SECRET_KEY:
+        raise HTTPException(500, "SECRET_KEY missing")
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         return payload["user_id"]
     except:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(401, "Invalid token")
 
 # -------------------------
 # MODELS
@@ -81,6 +96,9 @@ class SelectConcept(BaseModel):
 # -------------------------
 @app.post("/signup")
 def signup(user: User):
+    if not conn:
+        raise HTTPException(500, "DB not connected")
+
     cur = conn.cursor()
     hashed = hash_password(user.password)
 
@@ -90,22 +108,26 @@ def signup(user: User):
             (str(uuid.uuid4()), user.email, hashed)
         )
         return {"message": "User created"}
-    except:
-        raise HTTPException(status_code=400, detail="User exists")
+    except Exception as e:
+        print(e)
+        raise HTTPException(400, "User exists")
 
 @app.post("/login")
 def login(user: User):
+    if not conn:
+        raise HTTPException(500, "DB not connected")
+
     cur = conn.cursor()
     cur.execute("SELECT id, password FROM users WHERE email=%s", (user.email,))
     data = cur.fetchone()
 
     if not data:
-        raise HTTPException(status_code=400, detail="User not found")
+        raise HTTPException(400, "User not found")
 
     user_id, hashed = data
 
     if not verify_password(user.password, hashed):
-        raise HTTPException(status_code=400, detail="Wrong password")
+        raise HTTPException(400, "Wrong password")
 
     token = create_token(user_id)
     return {"token": token}
@@ -114,10 +136,13 @@ def login(user: User):
 # LLM
 # -------------------------
 def llm(prompt):
+    if not client:
+        return "OpenAI not configured"
+
     res = client.chat.completions.create(
         model="gpt-5.3",
         messages=[
-            {"role": "system", "content": "You are an elite creative studio AI. Give structured, high-quality outputs."},
+            {"role": "system", "content": "Creative studio AI"},
             {"role": "user", "content": prompt}
         ],
         temperature=0.6
@@ -128,6 +153,9 @@ def llm(prompt):
 # DB HELPERS
 # -------------------------
 def create_project(user_id):
+    if not conn:
+        raise HTTPException(500, "DB not connected")
+
     project_id = str(uuid.uuid4())
     cur = conn.cursor()
     cur.execute(
@@ -137,6 +165,9 @@ def create_project(user_id):
     return project_id
 
 def get_project(project_id):
+    if not conn:
+        raise HTTPException(500, "DB not connected")
+
     cur = conn.cursor()
     cur.execute("SELECT * FROM projects WHERE id=%s", (project_id,))
     row = cur.fetchone()
@@ -158,6 +189,9 @@ def get_project(project_id):
     }
 
 def update_project(project_id, field, value):
+    if not conn:
+        raise HTTPException(500, "DB not connected")
+
     cur = conn.cursor()
     cur.execute(
         f"UPDATE projects SET {field}=%s WHERE id=%s",
@@ -168,23 +202,24 @@ def update_project(project_id, field, value):
 # AI AGENTS
 # -------------------------
 def analysis_agent(b): return llm(f"Analyze:\n{b}")
-
 def concept_agent(a):
     try:
         return json.loads(llm(f"Return 3 concepts JSON:\n{a}"))
     except:
         return []
-
 def moodboard_agent(c): return llm(f"Moodboard:\n{c}")
-def render3d_agent(c): return llm(f"3D setup:\n{c}")
-def cad_agent(c): return llm(f"CAD layout:\n{c}")
+def render3d_agent(c): return llm(f"3D:\n{c}")
+def cad_agent(c): return llm(f"CAD:\n{c}")
 
 def image_agent(c):
+    if not client:
+        return []
+
     imgs=[]
     for _ in range(2):
         img = client.images.generate(
             model="gpt-image-1",
-            prompt=f"{c}, cinematic lighting, ultra realistic",
+            prompt=f"{c}, realistic render",
             size="1024x1024"
         )
         imgs.append(img.data[0].url)
@@ -241,7 +276,7 @@ def run(data: Input, token: str):
     return {"stage":"complete","project_id":project_id}
 
 # -------------------------
-# SELECT CONCEPT
+# SELECT
 # -------------------------
 @app.post("/select")
 def select(req: SelectConcept, token: str):
@@ -250,11 +285,3 @@ def select(req: SelectConcept, token: str):
     selected = project["concepts"][req.index]
     update_project(req.project_id,"selected",selected)
     return {"message":"selected"}
-
-# -------------------------
-# FETCH PROJECT
-# -------------------------
-@app.get("/project/{project_id}")
-def fetch(project_id: str, token: str):
-    get_user_from_token(token)
-    return get_project(project_id)
