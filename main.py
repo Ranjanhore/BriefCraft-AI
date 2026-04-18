@@ -1,17 +1,16 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
-import os
-import json
+from fastapi.responses import FileResponse
+import os, json
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
-# -------------------------
-# APP SETUP
-# -------------------------
 app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -------------------------
-# INPUT MODELS
+# MODELS
 # -------------------------
 class Input(BaseModel):
     text: str
@@ -20,74 +19,106 @@ class SelectConcept(BaseModel):
     index: int
 
 # -------------------------
-# LLM BRAIN
+# STRONG LLM BRAIN
 # -------------------------
-CREATIVE_BRAIN = """
+SYSTEM_BRAIN = """
 You are an elite creative studio AI.
 
-You specialize in:
-- event design
-- exhibition experiences
-- stage design
-- brand activations
-- immersive environments
-
-You think like:
+Think like:
 - creative director
-- experience designer
-- visual designer
+- spatial designer
+- visual artist
 
-Your job is to:
-- deeply understand the brief
-- create strong creative directions
-- define mood, visuals, and experience
+Rules:
+- Always give structured output
+- Be specific (materials, lighting, layout)
+- Avoid generic ideas
+- Think in real-world execution
 
-Outputs must include:
-- concept thinking
-- mood direction
-- visual ideas (lighting, materials, references)
-
-Avoid:
-- generic answers
-- only booth thinking
-
-Always think in full experience, not just structure.
+IMPORTANT:
+If JSON is requested → return ONLY valid JSON
+No explanation outside JSON
 """
 
 def llm(prompt):
     res = client.chat.completions.create(
         model="gpt-5.3",
         messages=[
-            {"role": "system", "content": CREATIVE_BRAIN},
+            {"role": "system", "content": SYSTEM_BRAIN},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.7
+        temperature=0.6
     )
-    return res.choices[0].message.content
+    return res.choices[0].message.content.strip()
 
 # -------------------------
-# STATE (MEMORY)
+# STATE
 # -------------------------
 state = {
     "brief": None,
     "analysis": None,
     "concepts": None,
-    "selected": None
+    "selected": None,
+    "moodboard": None,
+    "images": None,
+    "render3d": None,
+    "cad": None,
+    "pdf": None
 }
+
+# -------------------------
+# HELPERS
+# -------------------------
+def safe_json_parse(text):
+    try:
+        return json.loads(text)
+    except:
+        return []
+
+def build_presentation_text():
+    return f"""
+BRIEF:
+{state['brief']}
+
+ANALYSIS:
+{state['analysis']}
+
+SELECTED CONCEPT:
+{state['selected']}
+
+MOODBOARD:
+{state['moodboard']}
+
+3D RENDER:
+{state['render3d']}
+
+CAD:
+{state['cad']}
+"""
+
+def generate_pdf():
+    file_path = "presentation.pdf"
+    doc = SimpleDocTemplate(file_path)
+    styles = getSampleStyleSheet()
+
+    content = []
+    for line in build_presentation_text().split("\n"):
+        content.append(Paragraph(line, styles["Normal"]))
+        content.append(Spacer(1, 8))
+
+    doc.build(content)
+    return file_path
 
 # -------------------------
 # AGENTS
 # -------------------------
 def analysis_agent(brief):
     return llm(f"""
-You are a creative strategist.
-
-Understand this creative brief:
+Analyze this creative brief:
 
 {brief}
 
-Return STRICTLY in this structure:
-
+Return:
 Event Type:
 Audience:
 Objective:
@@ -95,39 +126,93 @@ Experience Goal:
 Visual Direction:
 Mood & Feel:
 Key Elements:
-Reference Style:
 Constraints:
 """)
 
 def concept_agent(analysis):
-    prompt = f"""
+    response = llm(f"""
 Based on this:
 
 {analysis}
 
-Create EXACTLY 3 creative concepts.
-
-Each concept must include:
-- name
-- idea
-- experience
-- visual
-- reference
-
-Return in JSON format:
+Return EXACTLY this JSON:
 
 [
-  {{"name":"", "idea":"", "experience":"", "visual":"", "reference":""}},
-  {{"name":"", "idea":"", "experience":"", "visual":"", "reference":""}},
-  {{"name":"", "idea":"", "experience":"", "visual":"", "reference":""}}
+  {{
+    "name": "",
+    "idea": "",
+    "experience": "",
+    "visual": "",
+    "reference": ""
+  }},
+  {{
+    "name": "",
+    "idea": "",
+    "experience": "",
+    "visual": "",
+    "reference": ""
+  }},
+  {{
+    "name": "",
+    "idea": "",
+    "experience": "",
+    "visual": "",
+    "reference": ""
+  }}
 ]
-"""
-    response = llm(prompt)
+""")
+    return safe_json_parse(response)
 
-    try:
-        return json.loads(response)
-    except:
-        return []
+def moodboard_agent(concept):
+    return llm(f"""
+Create a moodboard:
+
+{concept}
+
+Include:
+- Colors
+- Materials
+- Lighting
+- Style
+- Image prompts
+""")
+
+def render3d_agent(concept):
+    return llm(f"""
+Create 3D render setup:
+
+{concept}
+
+Include:
+- Scene
+- Camera
+- Lighting
+- Materials
+""")
+
+def cad_agent(concept):
+    return llm(f"""
+Create CAD layout:
+
+{concept}
+
+Include:
+- Dimensions
+- Zoning
+- Placement
+- Technical notes
+""")
+
+def image_agent(concept):
+    images = []
+    for _ in range(2):
+        img = client.images.generate(
+            model="gpt-image-1",
+            prompt=f"{concept}, cinematic lighting, ultra realistic, 4k",
+            size="1024x1024"
+        )
+        images.append(img.data[0].url)
+    return images
 
 # -------------------------
 # ORCHESTRATOR
@@ -135,54 +220,56 @@ Return in JSON format:
 @app.post("/run")
 def run(data: Input):
 
-    # Step 1: Save brief
     if not state["brief"]:
         state["brief"] = data.text
 
-    # Step 2: Analysis
     if not state["analysis"]:
         state["analysis"] = analysis_agent(state["brief"])
-        return {
-            "stage": "analysis",
-            "data": state["analysis"]
-        }
+        return {"stage": "analysis"}
 
-    # Step 3: Concepts
     if not state["concepts"]:
         state["concepts"] = concept_agent(state["analysis"])
-        return {
-            "stage": "concepts",
-            "data": state["concepts"]
-        }
+        return {"stage": "concepts", "data": state["concepts"]}
 
-    # Step 4: WAIT FOR SELECTION
     if not state["selected"]:
+        return {"stage": "select_concept", "options": state["concepts"]}
+
+    if not state["moodboard"]:
+        state["moodboard"] = moodboard_agent(state["selected"])
+        return {"stage": "moodboard"}
+
+    if not state["images"]:
+        state["images"] = image_agent(state["selected"])
+        return {"stage": "images", "data": state["images"]}
+
+    if not state["render3d"]:
+        state["render3d"] = render3d_agent(state["selected"])
+        return {"stage": "3d_render"}
+
+    if not state["cad"]:
+        state["cad"] = cad_agent(state["selected"])
+        return {"stage": "cad"}
+
+    if not state["pdf"]:
+        state["pdf"] = generate_pdf()
         return {
-            "stage": "select_concept",
-            "options": state["concepts"]
+            "stage": "pdf_ready",
+            "download_link": "http://localhost:8000/download"
         }
 
-    # Step 5: Confirm selection
-    return {
-        "stage": "selected",
-        "data": state["selected"]
-    }
+    return {"stage": "done"}
 
 # -------------------------
-# SELECT CONCEPT API
+# SELECT CONCEPT
 # -------------------------
 @app.post("/select")
-def select_concept(req: SelectConcept):
-
-    if not state["concepts"]:
-        return {"error": "No concepts available"}
-
-    if req.index < 0 or req.index > 2:
-        return {"error": "Invalid selection"}
-
+def select(req: SelectConcept):
     state["selected"] = state["concepts"][req.index]
+    return {"message": "selected"}
 
-    return {
-        "message": "Concept selected",
-        "selected": state["selected"]
-    }
+# -------------------------
+# DOWNLOAD
+# -------------------------
+@app.get("/download")
+def download():
+    return FileResponse("presentation.pdf", media_type='application/pdf', filename="presentation.pdf")
