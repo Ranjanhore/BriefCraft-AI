@@ -1,3 +1,23 @@
+import os
+from fastapi import FastAPI
+from dotenv import load_dotenv
+
+# Load environment variables (works locally + safe for Render)
+load_dotenv()
+
+app = FastAPI()
+
+@app.on_event("startup")
+def check_env():
+    OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+    DB_URL = os.getenv("DATABASE_URL")
+    SECRET_KEY = os.getenv("SECRET_KEY")
+
+    print("=== ENV CHECK ===")
+    print("OPENAI:", bool(OPENAI_KEY))
+    print("DB:", bool(DB_URL))
+    print("SECRET:", bool(SECRET_KEY))
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
@@ -16,10 +36,8 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 DB_URL = os.getenv("DATABASE_URL")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-print("App starting...")
-print("OPENAI:", bool(OPENAI_KEY))
-print("DB:", bool(DB_URL))
-print("SECRET:", bool(SECRET_KEY))
+from dotenv import load_dotenv
+load_dotenv()
 
 # -------------------------
 # APP INIT
