@@ -13,7 +13,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # -------------------------
 # DATABASE CONNECTION
 # -------------------------
-conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+conn = psycopg2.connect(DB_URL, sslmode='require')
 conn.autocommit = True
 
 # -------------------------
