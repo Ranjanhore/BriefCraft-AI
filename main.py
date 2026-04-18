@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
 from fastapi.responses import FileResponse
-import os, json
+import os, json, uuid
+import psycopg2
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
@@ -10,34 +11,28 @@ app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -------------------------
+# DATABASE CONNECTION
+# -------------------------
+conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+conn.autocommit = True
+
+# -------------------------
 # MODELS
 # -------------------------
 class Input(BaseModel):
     text: str
+    project_id: str = None
 
 class SelectConcept(BaseModel):
     index: int
+    project_id: str
 
 # -------------------------
-# STRONG LLM BRAIN
+# LLM
 # -------------------------
 SYSTEM_BRAIN = """
 You are an elite creative studio AI.
-
-Think like:
-- creative director
-- spatial designer
-- visual artist
-
-Rules:
-- Always give structured output
-- Be specific (materials, lighting, layout)
-- Avoid generic ideas
-- Think in real-world execution
-
-IMPORTANT:
-If JSON is requested → return ONLY valid JSON
-No explanation outside JSON
+Give structured, high-quality outputs.
 """
 
 def llm(prompt):
@@ -52,224 +47,126 @@ def llm(prompt):
     return res.choices[0].message.content.strip()
 
 # -------------------------
-# STATE
+# DB HELPERS
 # -------------------------
-state = {
-    "brief": None,
-    "analysis": None,
-    "concepts": None,
-    "selected": None,
-    "moodboard": None,
-    "images": None,
-    "render3d": None,
-    "cad": None,
-    "pdf": None
-}
+def create_project():
+    project_id = str(uuid.uuid4())
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO projects (id) VALUES (%s)",
+        (project_id,)
+    )
+    return project_id
 
-# -------------------------
-# HELPERS
-# -------------------------
-def safe_json_parse(text):
-    try:
-        return json.loads(text)
-    except:
-        return []
+def get_project(project_id):
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM projects WHERE id=%s", (project_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
 
-def build_presentation_text():
-    return f"""
-BRIEF:
-{state['brief']}
+    return {
+        "id": row[0],
+        "brief": row[1],
+        "analysis": row[2],
+        "concepts": row[3],
+        "selected": row[4],
+        "moodboard": row[5],
+        "images": row[6],
+        "render3d": row[7],
+        "cad": row[8]
+    }
 
-ANALYSIS:
-{state['analysis']}
-
-SELECTED CONCEPT:
-{state['selected']}
-
-MOODBOARD:
-{state['moodboard']}
-
-3D RENDER:
-{state['render3d']}
-
-CAD:
-{state['cad']}
-"""
-
-def generate_pdf():
-    file_path = "presentation.pdf"
-    doc = SimpleDocTemplate(file_path)
-    styles = getSampleStyleSheet()
-
-    content = []
-    for line in build_presentation_text().split("\n"):
-        content.append(Paragraph(line, styles["Normal"]))
-        content.append(Spacer(1, 8))
-
-    doc.build(content)
-    return file_path
+def update_project(project_id, field, value):
+    cur = conn.cursor()
+    cur.execute(f"UPDATE projects SET {field}=%s WHERE id=%s", (json.dumps(value) if isinstance(value,(list,dict)) else value, project_id))
 
 # -------------------------
 # AGENTS
 # -------------------------
-def analysis_agent(brief):
-    return llm(f"""
-Analyze this creative brief:
+def analysis_agent(b): return llm(f"Analyze:\n{b}")
+def concept_agent(a):
+    try:
+        return json.loads(llm(f"3 concepts JSON:\n{a}"))
+    except:
+        return []
+def moodboard_agent(c): return llm(f"Moodboard:\n{c}")
+def render3d_agent(c): return llm(f"3D setup:\n{c}")
+def cad_agent(c): return llm(f"CAD layout:\n{c}")
 
-{brief}
-
-Return:
-Event Type:
-Audience:
-Objective:
-Experience Goal:
-Visual Direction:
-Mood & Feel:
-Key Elements:
-Constraints:
-""")
-
-def concept_agent(analysis):
-    response = llm(f"""
-Based on this:
-
-{analysis}
-
-Return EXACTLY this JSON:
-
-[
-  {{
-    "name": "",
-    "idea": "",
-    "experience": "",
-    "visual": "",
-    "reference": ""
-  }},
-  {{
-    "name": "",
-    "idea": "",
-    "experience": "",
-    "visual": "",
-    "reference": ""
-  }},
-  {{
-    "name": "",
-    "idea": "",
-    "experience": "",
-    "visual": "",
-    "reference": ""
-  }}
-]
-""")
-    return safe_json_parse(response)
-
-def moodboard_agent(concept):
-    return llm(f"""
-Create a moodboard:
-
-{concept}
-
-Include:
-- Colors
-- Materials
-- Lighting
-- Style
-- Image prompts
-""")
-
-def render3d_agent(concept):
-    return llm(f"""
-Create 3D render setup:
-
-{concept}
-
-Include:
-- Scene
-- Camera
-- Lighting
-- Materials
-""")
-
-def cad_agent(concept):
-    return llm(f"""
-Create CAD layout:
-
-{concept}
-
-Include:
-- Dimensions
-- Zoning
-- Placement
-- Technical notes
-""")
-
-def image_agent(concept):
-    images = []
+def image_agent(c):
+    imgs=[]
     for _ in range(2):
         img = client.images.generate(
             model="gpt-image-1",
-            prompt=f"{concept}, cinematic lighting, ultra realistic, 4k",
+            prompt=f"{c}, realistic event render",
             size="1024x1024"
         )
-        images.append(img.data[0].url)
-    return images
+        imgs.append(img.data[0].url)
+    return imgs
 
 # -------------------------
-# ORCHESTRATOR
+# ORCHESTRATOR (DB BASED)
 # -------------------------
 @app.post("/run")
 def run(data: Input):
 
-    if not state["brief"]:
-        state["brief"] = data.text
+    # create or load project
+    project_id = data.project_id or create_project()
+    project = get_project(project_id)
 
-    if not state["analysis"]:
-        state["analysis"] = analysis_agent(state["brief"])
-        return {"stage": "analysis"}
+    if not project["brief"]:
+        update_project(project_id, "brief", data.text)
+        return {"stage":"brief_saved","project_id":project_id}
 
-    if not state["concepts"]:
-        state["concepts"] = concept_agent(state["analysis"])
-        return {"stage": "concepts", "data": state["concepts"]}
+    if not project["analysis"]:
+        result = analysis_agent(project["brief"])
+        update_project(project_id,"analysis",result)
+        return {"stage":"analysis","project_id":project_id}
 
-    if not state["selected"]:
-        return {"stage": "select_concept", "options": state["concepts"]}
+    if not project["concepts"]:
+        result = concept_agent(project["analysis"])
+        update_project(project_id,"concepts",result)
+        return {"stage":"concepts","data":result,"project_id":project_id}
 
-    if not state["moodboard"]:
-        state["moodboard"] = moodboard_agent(state["selected"])
-        return {"stage": "moodboard"}
+    if not project["selected"]:
+        return {"stage":"select_concept","options":project["concepts"],"project_id":project_id}
 
-    if not state["images"]:
-        state["images"] = image_agent(state["selected"])
-        return {"stage": "images", "data": state["images"]}
+    if not project["moodboard"]:
+        result = moodboard_agent(project["selected"])
+        update_project(project_id,"moodboard",result)
+        return {"stage":"moodboard","project_id":project_id}
 
-    if not state["render3d"]:
-        state["render3d"] = render3d_agent(state["selected"])
-        return {"stage": "3d_render"}
+    if not project["images"]:
+        result = image_agent(project["selected"])
+        update_project(project_id,"images",result)
+        return {"stage":"images","data":result,"project_id":project_id}
 
-    if not state["cad"]:
-        state["cad"] = cad_agent(state["selected"])
-        return {"stage": "cad"}
+    if not project["render3d"]:
+        result = render3d_agent(project["selected"])
+        update_project(project_id,"render3d",result)
+        return {"stage":"3d_render","project_id":project_id}
 
-    if not state["pdf"]:
-        state["pdf"] = generate_pdf()
-        return {
-            "stage": "pdf_ready",
-            "download_link": "http://localhost:8000/download"
-        }
+    if not project["cad"]:
+        result = cad_agent(project["selected"])
+        update_project(project_id,"cad",result)
+        return {"stage":"cad","project_id":project_id}
 
-    return {"stage": "done"}
+    return {"stage":"complete","project_id":project_id}
 
 # -------------------------
 # SELECT CONCEPT
 # -------------------------
 @app.post("/select")
 def select(req: SelectConcept):
-    state["selected"] = state["concepts"][req.index]
-    return {"message": "selected"}
+    project = get_project(req.project_id)
+    selected = project["concepts"][req.index]
+    update_project(req.project_id,"selected",selected)
+    return {"message":"selected"}
 
 # -------------------------
-# DOWNLOAD
+# GET PROJECT
 # -------------------------
-@app.get("/download")
-def download():
-    return FileResponse("presentation.pdf", media_type='application/pdf', filename="presentation.pdf")
+@app.get("/project/{project_id}")
+def fetch(project_id: str):
+    return get_project(project_id)
