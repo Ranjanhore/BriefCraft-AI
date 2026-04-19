@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 openai
-psycopg2-binary
 python-dotenv
+psycopg2-binary
 python-jose
 passlib[bcrypt]
-reportlab
+requests
