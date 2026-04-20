@@ -4,8 +4,9 @@ python-dotenv
 openai
 psycopg[binary]
 supabase
-pydantic
 python-jose
-passlib
+passlib[bcrypt]
 requests
+pymupdf
 aiofiles
+python-multipart
