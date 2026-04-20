@@ -1,0 +1,32 @@
+{
+  "scene": {
+    "units": "feet",
+    "stage": {
+      "width": 60,
+      "depth": 24,
+      "height": 4
+    },
+    "led_wall": {
+      "type": "curved",
+      "width": 40,
+      "height": 12
+    },
+    "audience": {
+      "rows": 10,
+      "cols": 20
+    },
+    "colors": {
+      "primary": "#1A5DFF",
+      "secondary": "#A855F7"
+    },
+    "lighting": {
+      "style": "futuristic"
+    },
+    "camera_target": [0, 0, 6]
+  },
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "output_dir": "/tmp/ai_creative_renders/job_001"
+  }
+}
