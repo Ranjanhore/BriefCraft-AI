@@ -606,18 +606,16 @@ def get_user_by_email(cur, email: str):
 
 
 @with_db
-def create_user(email, password, full_name=None):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        uid = str(uuid.uuid4())
-        cur.execute(
-            """
-            insert into users (id, email, password, full_name)
-            values (%s, %s, %s, %s)
-            """,
-            (uid, email, hash_password(password), full_name)
-        )
-        return uid
+def create_user(cur, email, password, full_name=None):
+    uid = str(uuid.uuid4())
+    cur.execute(
+        """
+        insert into users (id, email, password, full_name)
+        values (%s, %s, %s, %s)
+        """,
+        (uid, email, hash_password(password), full_name)
+    )
+    return uid
     
 @with_db
 def create_project(cur, user_id: str, name: Optional[str] = None, event_type: Optional[str] = None) -> str:
