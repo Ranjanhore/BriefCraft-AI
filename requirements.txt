@@ -3,7 +3,7 @@ uvicorn
 python-dotenv
 openai
 python-jose
-passlib[bcrypt]
+passlib
 psycopg[binary]
 pydantic[email]
 python-multipart
