@@ -18,7 +18,7 @@ from psycopg.rows import dict_row
 
 from dotenv import load_dotenv
 from jose import jwt, JWTError
-from passlib.context import 
+from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from fastapi import (
