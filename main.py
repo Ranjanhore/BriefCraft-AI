@@ -18,7 +18,7 @@ from psycopg.rows import dict_row
 
 from dotenv import load_dotenv
 from jose import jwt, JWTError
-from passlib.context import CryptContext
+from passlib.context import 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from fastapi import (
@@ -76,7 +76,7 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================
 
 client: Optional[OpenAI] = None
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
