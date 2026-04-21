@@ -5,7 +5,6 @@ openai
 python-jose
 passlib[bcrypt]
 psycopg[binary]
-psycopg-pool
 pydantic[email]
 python-multipart
 requests
