@@ -465,10 +465,9 @@ def best_project_name_from_prompt(prompt: str) -> str:
 # ============================================================
 
 class UserInput(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6, max_length=200)
+    email: str
+    password: str
     full_name: Optional[str] = None
-
 
 class RunInput(BaseModel):
     text: str = Field(min_length=3)
@@ -607,14 +606,20 @@ def get_user_by_email(cur, email: str):
 
 
 @with_db
-def create_user(cur, email: str, password: str, full_name: Optional[str] = None) -> str:
-    user_id = str(uuid.uuid4())
-    cur.execute("""
-        insert into public.users (id, email, password, full_name)
-        values (%s, %s, %s, %s)
-        returning id
-    """, (user_id, email, hash_password(password), full_name))
-    return str(cur.fetchone()["id"])
+def create_user(email, password, full_name=None):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        uid = str(uuid.uuid4())
+
+        cur.execute(
+            """
+            insert into users (id, email, password, full_name)
+            values (%s, %s, %s, %s)
+            """,
+            (uid, email, hash_password(password), full_name)
+        )
+
+        return uid
 
 
 @with_db
@@ -1492,13 +1497,14 @@ def root():
 
 
 @app.post("/signup")
-def signup(payload: UserInput):
-    existing = get_user_by_email(payload.email)
-    if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
-    user_id = create_user(payload.email, payload.password, payload.full_name)
-    token = create_token(user_id)
-    return {"message": "User created", "user_id": user_id, "token": token}
+def signup(data: UserInput):
+    return {
+        "user_id": create_user(
+            data.email,
+            data.password,
+            data.full_name
+        )
+    }
 
 
 @app.post("/login")
