@@ -102,7 +102,7 @@ def with_db(fn):
 
 
 @with_db
-def create_user(cur, email, password, full_name=None):
+def create_project(cur, user_id, name=None, event_type=None):
     uid = str(uuid.uuid4())
     cur.execute(
         """
@@ -641,7 +641,7 @@ def create_project(cur, user_id, name=None, event_type=None):
 
 
 @with_db
-def get_project(cur, project_id: str) -> Optional[Dict[str, Any]]:
+def update_project_field(cur, project_id, field, value):
     cur.execute("select * from public.projects where id = %s", (project_id,))
     row = cur.fetchone()
     if not row:
@@ -667,7 +667,7 @@ def update_project_field(cur, project_id: str, field: str, value: Any) -> None:
 
 
 @with_db
-def snapshot_project_version(cur, project_id: str, user_id: str, note: str = "") -> None:
+def snapshot_project_version(cur, project_id, user_id, note=""):
     project = get_project(project_id)
     if not project:
         return
@@ -1557,63 +1557,65 @@ def list_comments(project_id: str, user_id: str = Depends(get_current_user_id)):
 
 @app.post("/run")
 def run_pipeline(payload: RunInput, user_id: str = Depends(get_current_user_id)):
-    project_id = payload.project_id or create_project(
-        user_id=user_id,
-        name=payload.name or best_project_name_from_prompt(payload.text),
-        event_type=payload.event_type,
-    )
+    try:
+        project_id = payload.project_id or create_project(
+            user_id=user_id,
+            name=payload.name or best_project_name_from_prompt(payload.text),
+            event_type=payload.event_type,
+        )
 
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        project = get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    if not project.get("brief"):
-        update_project_field(project_id, "brief", payload.text)
-        update_project_field(project_id, "status", "brief_received")
-        snapshot_project_version(project_id, user_id, note="Brief saved")
-        return {"stage": "brief_saved", "project_id": project_id}
+        if not project.get("brief"):
+            update_project_field(project_id, "brief", payload.text)
+            update_project_field(project_id, "status", "brief_received")
+            snapshot_project_version(project_id, user_id, note="Brief saved")
+            return {"stage": "brief_saved", "project_id": project_id}
 
-    if not project.get("analysis"):
-        analysis = analyze_brief(project["brief"])
-        update_project_field(project_id, "analysis", analysis)
-        update_project_field(project_id, "status", "analysis_ready")
-        snapshot_project_version(project_id, user_id, note="Analysis generated")
-        return {"stage": "analysis_ready", "project_id": project_id, "analysis": analysis}
+        if not project.get("analysis"):
+            analysis = analyze_brief(project["brief"])
+            update_project_field(project_id, "analysis", analysis)
+            update_project_field(project_id, "status", "analysis_ready")
+            snapshot_project_version(project_id, user_id, note="Analysis generated")
+            return {"stage": "analysis_ready", "project_id": project_id, "analysis": analysis}
 
-    if not project.get("concepts"):
-        concepts = generate_concepts(project["analysis"])
-        update_project_field(project_id, "concepts", concepts)
-        update_project_field(project_id, "status", "concepts_ready")
-        snapshot_project_version(project_id, user_id, note="Concept options generated")
-        return {"stage": "concepts_ready", "project_id": project_id, "concepts": concepts}
+        if not project.get("concepts"):
+            concepts = generate_concepts(project["analysis"])
+            update_project_field(project_id, "concepts", concepts)
+            update_project_field(project_id, "status", "concepts_ready")
+            snapshot_project_version(project_id, user_id, note="Concept options generated")
+            return {"stage": "concepts_ready", "project_id": project_id, "concepts": concepts}
 
-    if not project.get("selected"):
+        if not project.get("selected"):
+            return {
+                "stage": "awaiting_concept_selection",
+                "project_id": project_id,
+                "options": project["concepts"],
+            }
+
+        if not project.get("moodboard"):
+            moodboard = generate_moodboard(project["selected"])
+            update_project_field(project_id, "moodboard", moodboard)
+            update_project_field(project_id, "status", "moodboard_ready")
+            snapshot_project_version(project_id, user_id, note="Moodboard generated")
+            return {"stage": "moodboard_ready", "project_id": project_id, "moodboard": moodboard}
+
+        if not project.get("images"):
+            images = generate_concept_images(project["selected"])
+            update_project_field(project_id, "images", images)
+            update_project_field(project_id, "status", "concept_images_ready")
+            snapshot_project_version(project_id, user_id, note="Concept images generated")
+            return {"stage": "concept_images_ready", "project_id": project_id, "images": images}
+
         return {
-            "stage": "awaiting_concept_selection",
+            "stage": "ready_for_multi_angle_3d",
             "project_id": project_id,
-            "options": project["concepts"],
+            "message": "Concept approved. Ready for multi-angle render.",
         }
-
-    if not project.get("moodboard"):
-        moodboard = generate_moodboard(project["selected"])
-        update_project_field(project_id, "moodboard", moodboard)
-        update_project_field(project_id, "status", "moodboard_ready")
-        snapshot_project_version(project_id, user_id, note="Moodboard generated")
-        return {"stage": "moodboard_ready", "project_id": project_id, "moodboard": moodboard}
-
-    if not project.get("images"):
-        images = generate_concept_images(project["selected"])
-        update_project_field(project_id, "images", images)
-        update_project_field(project_id, "status", "concept_images_ready")
-        snapshot_project_version(project_id, user_id, note="Concept images generated")
-        return {"stage": "concept_images_ready", "project_id": project_id, "images": images}
-
-    return {
-        "stage": "ready_for_multi_angle_3d",
-        "project_id": project_id,
-        "message": "Concept approved. Ready for multi-angle render.",
-    }
-
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
 
 @app.post("/select")
 def select_concept(payload: SelectConceptInput, user_id: str = Depends(get_current_user_id)):
