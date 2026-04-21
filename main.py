@@ -94,12 +94,17 @@ def get_conn():
     return psycopg.connect(require_db_url(), row_factory=dict_row, autocommit=True)
 
 
-def with_db(fn):
-    def wrapper(*args, **kwargs):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                return fn(cur, *args, **kwargs)
-    return wrapper
+@with_db
+def create_user(cur, email, password, full_name=None):
+    uid = str(uuid.uuid4())
+    cur.execute(
+        """
+        insert into users (id, email, password, full_name)
+        values (%s, %s, %s, %s)
+        """,
+        (uid, email, hash_password(password), full_name)
+    )
+    return uid
 
 
 def create_tables() -> None:
@@ -596,7 +601,7 @@ PROJECT_ALLOWED_FIELDS = {
 
 
 @with_db
-def get_user_by_email(cur, email: str):
+def create_project(cur, user_id, name=None, event_type=None):
     cur.execute("""
         select id, email, password, full_name, role, is_active
         from public.users
