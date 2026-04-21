@@ -2,11 +2,10 @@ fastapi
 uvicorn
 python-dotenv
 openai
-psycopg[binary]
-supabase
 python-jose
 passlib[bcrypt]
-requests
-pymupdf
-aiofiles
+psycopg[binary]
+psycopg-pool
+pydantic[email]
 python-multipart
+requests
