@@ -610,7 +610,6 @@ def create_user(email, password, full_name=None):
     with get_conn() as conn:
         cur = conn.cursor()
         uid = str(uuid.uuid4())
-
         cur.execute(
             """
             insert into users (id, email, password, full_name)
@@ -618,10 +617,9 @@ def create_user(email, password, full_name=None):
             """,
             (uid, email, hash_password(password), full_name)
         )
-
         return uid
 
-
+    
 @with_db
 def create_project(cur, user_id: str, name: Optional[str] = None, event_type: Optional[str] = None) -> str:
     project_id = str(uuid.uuid4())
@@ -1498,14 +1496,11 @@ def root():
 
 @app.post("/signup")
 def signup(data: UserInput):
-    return {
-        "user_id": create_user(
-            data.email,
-            data.password,
-            data.full_name
-        )
-    }
-
+    try:
+        user_id = create_user(data.email, data.password, getattr(data, "full_name", None))
+        return {"user_id": user_id}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/login")
 def login(payload: UserInput):
