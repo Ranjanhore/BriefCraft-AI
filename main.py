@@ -1495,9 +1495,16 @@ def root():
 
 @app.post("/signup")
 def signup(data: UserInput):
-    user_id = create_user(data.email, data.password, data.full_name)
-    token = create_token(user_id)
-    return {"message": "User created", "user_id": user_id, "token": token}
+    try:
+        user_id = create_user(data.email, data.password, data.full_name)
+        token = create_token(user_id)
+        return {
+            "message": "User created",
+            "user_id": user_id,
+            "token": token
+        }
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
 
 @app.post("/login")
 def login(payload: UserInput):
