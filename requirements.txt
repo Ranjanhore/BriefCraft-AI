@@ -5,6 +5,6 @@ openai
 python-jose
 passlib
 psycopg[binary]
-pydantic[email]
+pydantic
 python-multipart
 requests
