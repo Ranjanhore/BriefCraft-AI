@@ -4,6 +4,7 @@ import json
 import uuid
 import socket
 import struct
+import base64
 import datetime as dt
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -90,6 +91,18 @@ QLAB_OSC_PORT = int(os.getenv("QLAB_OSC_PORT", "0") or "0")
 EOS_OSC_IP = os.getenv("EOS_OSC_IP", "").strip()
 EOS_OSC_PORT = int(os.getenv("EOS_OSC_PORT", "0") or "0")
 RESOLUME_BASE_URL = os.getenv("RESOLUME_BASE_URL", "").strip().rstrip("/")
+MIDI_OUTPUT_NAME = os.getenv("MIDI_OUTPUT_NAME", "").strip()
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2").strip()
+IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high").strip()
+VISUAL_ASPECT_RATIO = os.getenv("VISUAL_ASPECT_RATIO", "16:9").strip()
+VISUAL_PREVIEW_SIZE = os.getenv("VISUAL_PREVIEW_SIZE", "1920x1080").strip()
+VISUAL_MASTER_SIZE = os.getenv("VISUAL_MASTER_SIZE", "3840x2160").strip()
+VISUAL_PRINT_SIZE = os.getenv("VISUAL_PRINT_SIZE", "5760x3240").strip()
+AUTO_GENERATE_MOODBOARD_ON_SELECT = os.getenv("AUTO_GENERATE_MOODBOARD_ON_SELECT", "false").strip().lower() in {"1", "true", "yes", "on"}
+BLENDER_QUEUE_URL = os.getenv("BLENDER_QUEUE_URL", "").strip().rstrip("/")
+CAD_QUEUE_URL = os.getenv("CAD_QUEUE_URL", "").strip().rstrip("/")
+VIDEO_QUEUE_URL = os.getenv("VIDEO_QUEUE_URL", "").strip().rstrip("/")
+GOOGLE_SHEETS_SYNC_URL = os.getenv("GOOGLE_SHEETS_SYNC_URL", "").strip().rstrip("/")
 
 client = None
 pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
@@ -229,7 +242,7 @@ def project_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     for key in (
         "concepts", "selected", "images", "render3d", "scene_json", "deliverables",
         "dimensions", "brand_data", "presentation_data", "sound_data", "lighting_data",
-        "showrunner_data", "department_outputs",
+        "showrunner_data", "department_outputs", "visual_policy", "orchestration_data",
     ):
         if key in item:
             item[key] = load_json(item.get(key))
@@ -300,6 +313,8 @@ def create_tables() -> None:
                 "alter table public.projects add column if not exists lighting_data jsonb;",
                 "alter table public.projects add column if not exists showrunner_data jsonb;",
                 "alter table public.projects add column if not exists department_outputs jsonb;",
+                "alter table public.projects add column if not exists visual_policy jsonb;",
+                "alter table public.projects add column if not exists orchestration_data jsonb;",
                 "alter table public.projects add column if not exists updated_at timestamptz not null default now();",
             ]:
                 cur.execute(stmt)
@@ -349,6 +364,62 @@ def create_tables() -> None:
                     content text,
                     transcript text,
                     audio_url text,
+                    meta jsonb,
+                    created_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.project_assets (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    asset_type text not null,
+                    section text,
+                    job_kind text,
+                    title text not null default 'Untitled Asset',
+                    prompt text,
+                    status text not null default 'queued',
+                    preview_url text,
+                    master_url text,
+                    print_url text,
+                    source_file_url text,
+                    meta jsonb,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.agent_jobs (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    agent_type text not null,
+                    job_type text not null,
+                    title text not null default 'Agent Job',
+                    status text not null default 'queued',
+                    priority int not null default 5,
+                    progress numeric(5,2) not null default 0,
+                    input_data jsonb,
+                    output_data jsonb,
+                    error_text text,
+                    parent_job_id uuid,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now(),
+                    started_at timestamptz,
+                    completed_at timestamptz
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.project_activity_logs (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid references public.users(id) on delete set null,
+                    activity_type text not null,
+                    title text not null,
+                    detail text,
                     meta jsonb,
                     created_at timestamptz not null default now()
                 );
@@ -1314,6 +1385,72 @@ def execute_control_action(action: Dict[str, Any]) -> Dict[str, Any]:
             "response_text": response.text[:500],
         }
 
+    if protocol == "udp":
+        ip = action.get("ip") or default_ip
+        port = int(action.get("port") or default_port or 0)
+        payload = action.get("body") or action.get("data_bytes") or action.get("args") or ""
+        if isinstance(payload, (dict, list)):
+            payload = dump_json(payload)
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        elif isinstance(payload, list):
+            payload = bytes(int(x) & 0xFF for x in payload)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(payload, (ip, port))
+        sock.close()
+        return {"ok": True, "protocol": "udp", "target": target, "ip": ip, "port": port, "bytes_sent": len(payload)}
+
+    if protocol == "tcp":
+        ip = action.get("ip") or default_ip
+        port = int(action.get("port") or default_port or 0)
+        payload = action.get("body") or action.get("data_bytes") or action.get("args") or ""
+        if isinstance(payload, (dict, list)):
+            payload = dump_json(payload)
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        elif isinstance(payload, list):
+            payload = bytes(int(x) & 0xFF for x in payload)
+        with socket.create_connection((ip, port), timeout=8) as sock:
+            sock.sendall(payload)
+            response_data = b""
+            try:
+                sock.settimeout(1.5)
+                response_data = sock.recv(4096)
+            except Exception:
+                response_data = b""
+        return {"ok": True, "protocol": "tcp", "target": target, "ip": ip, "port": port, "bytes_sent": len(payload), "response_text": response_data[:500].decode("utf-8", errors="ignore")}
+
+    if protocol == "midi":
+        try:
+            import mido
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"MIDI support requires mido/python-rtmidi: {exc}")
+        output_name = str(action.get("output_name") or MIDI_OUTPUT_NAME or "").strip()
+        if output_name:
+            port_obj = mido.open_output(output_name)
+        else:
+            names = mido.get_output_names()
+            if not names:
+                raise HTTPException(status_code=400, detail="No MIDI output device available")
+            output_name = names[0]
+            port_obj = mido.open_output(output_name)
+        msg_type = str(action.get("message_type") or "note_on").strip().lower()
+        kwargs = {"type": msg_type, "channel": int(action.get("channel") or 0)}
+        if msg_type in {"note_on", "note_off"}:
+            kwargs["note"] = int(action.get("note") or 0)
+            kwargs["velocity"] = int(action.get("velocity") or 64)
+        elif msg_type == "control_change":
+            kwargs["control"] = int(action.get("control") or 0)
+            kwargs["value"] = int(action.get("value") or 0)
+        elif msg_type == "program_change":
+            kwargs["program"] = int(action.get("program") or 0)
+        elif msg_type == "sysex":
+            kwargs = {"type": "sysex", "data": [int(x) & 0x7F for x in (action.get("data_bytes") or [])]}
+        msg = mido.Message(**kwargs)
+        port_obj.send(msg)
+        port_obj.close()
+        return {"ok": True, "protocol": "midi", "target": target, "output_name": output_name, "message": msg.dict() if hasattr(msg, 'dict') else str(msg)}
+
     raise HTTPException(status_code=400, detail=f"Unsupported control protocol: {protocol}")
 
 
@@ -1546,10 +1683,68 @@ class ControlActionInput(BaseModel):
     headers: Optional[Dict[str, str]] = None
     params: Optional[Dict[str, Any]] = None
     body: Optional[Dict[str, Any]] = None
+    output_name: Optional[str] = None
+    message_type: Optional[str] = None
+    channel: Optional[int] = None
+    note: Optional[int] = None
+    velocity: Optional[int] = None
+    control: Optional[int] = None
+    value: Optional[int] = None
+    program: Optional[int] = None
+    data_bytes: Optional[List[int]] = None
 
 
 class ArmInput(BaseModel):
     armed: bool = True
+
+
+class CueJumpInput(BaseModel):
+    cue_index: Optional[int] = Field(default=None, ge=0)
+    cue_no: Optional[int] = None
+
+
+class VisualPolicyInput(BaseModel):
+    preview_size: Optional[str] = None
+    master_size: Optional[str] = None
+    print_size: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+
+
+class AssetCreateInput(BaseModel):
+    asset_type: str
+    title: str
+    prompt: str = Field(min_length=3)
+    section: Optional[str] = None
+    job_kind: Optional[str] = None
+    source_asset_id: Optional[str] = None
+    generate_now: bool = True
+
+
+class MoodboardGenerateInput(BaseModel):
+    concept_index: Optional[int] = Field(default=None, ge=0, le=2)
+    count: int = Field(default=3, ge=1, le=6)
+    generate_now: bool = True
+
+
+class JobQueueInput(BaseModel):
+    agent_type: str
+    job_type: str
+    title: Optional[str] = None
+    priority: int = Field(default=5, ge=1, le=10)
+    input_data: Optional[Dict[str, Any]] = None
+
+
+class OrchestrateInput(BaseModel):
+    auto_generate_moodboard: bool = True
+    queue_3d: bool = True
+    queue_video: bool = True
+    queue_cad: bool = True
+    queue_manuals: bool = True
+
+
+class ReferenceUploadMeta(BaseModel):
+    title: Optional[str] = None
+    section: Optional[str] = None
 
 
 # ------------------------------------------------------------------------------
@@ -1830,12 +2025,22 @@ def select_concept(payload: SelectConceptInput, current_user: Dict[str, Any] = D
     selected = concepts[payload.index]
     project = update_project_fields(payload.project_id, user_id, {"selected": selected, "status": "concept_selected"})
     snapshot_project_version(payload.project_id, user_id, f"Selected concept {payload.index}")
+    moodboard_assets: List[Dict[str, Any]] = []
+    moodboard_error = None
+    if AUTO_GENERATE_MOODBOARD_ON_SELECT:
+        try:
+            result = generate_moodboards_endpoint(payload.project_id, MoodboardGenerateInput(concept_index=payload.index, count=3, generate_now=True), current_user)
+            moodboard_assets = result.get("assets") or []
+        except Exception as exc:
+            moodboard_error = str(exc)
 
     return {
         "message": "Concept selected",
         "index": payload.index,
         "selected": selected,
         "project": project,
+        "moodboard_assets": moodboard_assets,
+        "moodboard_error": moodboard_error,
     }
 
 
@@ -2359,6 +2564,695 @@ def show_console_compat(project_id: str, command: str, current_user: Dict[str, A
     if cmd in {"panic", "stop"}:
         return show_console_panic(project_id, current_user)
     return show_console_status(project_id, current_user)
+
+
+# ------------------------------------------------------------------------------
+# ADVANCED ASSETS / AGENT JOBS / 16:9 VISUAL PIPELINE
+# ------------------------------------------------------------------------------
+def asset_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(row)
+    if "meta" in item:
+        item["meta"] = load_json(item.get("meta"))
+    return item
+
+
+def job_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(row)
+    for key in ("input_data", "output_data"):
+        if key in item:
+            item[key] = load_json(item.get(key))
+    return item
+
+
+def activity_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(row)
+    if "meta" in item:
+        item["meta"] = load_json(item.get("meta"))
+    return item
+
+
+def parse_size(value: str, fallback: Tuple[int, int]) -> Tuple[int, int]:
+    try:
+        left, right = str(value).lower().split("x", 1)
+        w, h = int(left), int(right)
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return fallback
+
+
+def normalize_visual_size(size: Optional[str], fallback: str) -> str:
+    raw = (size or fallback or "3840x2160").lower().strip()
+    w, h = parse_size(raw, parse_size(fallback, (3840, 2160)))
+    if h == 0:
+        return fallback
+    ratio = round(w / h, 4)
+    if abs(ratio - (16 / 9)) > 0.02:
+        w = int(round(h * 16 / 9))
+    if w > 3840 or h > 3840:
+        scale = min(3840 / max(w, 1), 3840 / max(h, 1))
+        w = max(512, int(w * scale))
+        h = max(512, int(h * scale))
+        w = int(round(h * 16 / 9))
+    return f"{w}x{h}"
+
+
+def default_visual_policy() -> Dict[str, Any]:
+    preview = normalize_visual_size(VISUAL_PREVIEW_SIZE, "1920x1080")
+    master = normalize_visual_size(VISUAL_MASTER_SIZE, "3840x2160")
+    pw, ph = parse_size(VISUAL_PRINT_SIZE, (5760, 3240))
+    if abs((pw / max(ph, 1)) - (16 / 9)) > 0.02:
+        pw = int(round(ph * 16 / 9))
+    return {
+        "aspect_ratio": VISUAL_ASPECT_RATIO or "16:9",
+        "preview_size": preview,
+        "master_size": master,
+        "print_size": f"{pw}x{ph}",
+        "preview_format": "jpg",
+        "master_format": "png",
+        "print_format": "png",
+        "quality": IMAGE_QUALITY or "high",
+        "printable": True,
+        "created_from": "default_policy",
+    }
+
+
+def merged_visual_policy(project: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    policy = default_visual_policy()
+    if project:
+        custom = load_json(project.get("visual_policy")) or {}
+        if isinstance(custom, dict):
+            policy.update({k: v for k, v in custom.items() if v not in (None, "")})
+    policy["preview_size"] = normalize_visual_size(policy.get("preview_size"), default_visual_policy()["preview_size"])
+    policy["master_size"] = normalize_visual_size(policy.get("master_size"), default_visual_policy()["master_size"])
+    return policy
+
+
+def ensure_visual_policy(project_id: str, user_id: str) -> Dict[str, Any]:
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    policy = merged_visual_policy(project)
+    if load_json(project.get("visual_policy")) != policy:
+        update_project_fields(project_id, user_id, {"visual_policy": policy})
+    return policy
+
+
+def safe_filename(name: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(name or "asset")).strip("_")
+    return value or "asset"
+
+
+@with_db
+def create_project_asset(cur, project_id: str, user_id: str, asset_type: str, title: str, prompt: Optional[str] = None, section: Optional[str] = None, job_kind: Optional[str] = None, status: str = "queued", preview_url: Optional[str] = None, master_url: Optional[str] = None, print_url: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    asset_id = str(uuid.uuid4())
+    cur.execute(
+        """
+        insert into public.project_assets (
+            id, project_id, user_id, asset_type, section, job_kind, title, prompt, status,
+            preview_url, master_url, print_url, source_file_url, meta
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (asset_id, project_id, user_id, asset_type, section, job_kind, title, prompt, status, preview_url, master_url, print_url, source_file_url, dump_json(meta or {})),
+    )
+    cur.execute("select * from public.project_assets where id = %s", (asset_id,))
+    return asset_row_to_dict(cur.fetchone())
+
+
+@with_db
+def update_project_asset(cur, asset_id: str, user_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    if not values:
+        cur.execute("select * from public.project_assets where id = %s and user_id = %s", (asset_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        return asset_row_to_dict(row)
+    allowed = {"asset_type", "section", "job_kind", "title", "prompt", "status", "preview_url", "master_url", "print_url", "source_file_url", "meta"}
+    clean = {k: v for k, v in values.items() if k in allowed}
+    if not clean:
+        raise HTTPException(status_code=400, detail="No valid asset fields supplied")
+    assignments = []
+    params: List[Any] = []
+    for key, value in clean.items():
+        assignments.append(f"{key} = %s")
+        params.append(dump_json(value) if isinstance(value, (dict, list)) else value)
+    assignments.append("updated_at = now()")
+    params.extend([asset_id, user_id])
+    cur.execute(f"update public.project_assets set {', '.join(assignments)} where id = %s and user_id = %s", params)
+    cur.execute("select * from public.project_assets where id = %s and user_id = %s", (asset_id, user_id))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return asset_row_to_dict(row)
+
+
+@with_db
+def list_project_assets(cur, project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
+    if section:
+        cur.execute(
+            """
+            select * from public.project_assets
+            where project_id = %s and user_id = %s and section = %s
+            order by created_at desc
+            """,
+            (project_id, user_id, section),
+        )
+    else:
+        cur.execute(
+            """
+            select * from public.project_assets
+            where project_id = %s and user_id = %s
+            order by created_at desc
+            """,
+            (project_id, user_id),
+        )
+    return [asset_row_to_dict(r) for r in cur.fetchall()]
+
+
+@with_db
+def get_project_asset_by_id(cur, asset_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    cur.execute("select * from public.project_assets where id = %s and user_id = %s limit 1", (asset_id, user_id))
+    row = cur.fetchone()
+    return asset_row_to_dict(row) if row else None
+
+
+@with_db
+def create_agent_job(cur, project_id: str, user_id: str, agent_type: str, job_type: str, title: str, priority: int = 5, input_data: Optional[Dict[str, Any]] = None, status: str = "queued", parent_job_id: Optional[str] = None) -> Dict[str, Any]:
+    job_id = str(uuid.uuid4())
+    cur.execute(
+        """
+        insert into public.agent_jobs (
+            id, project_id, user_id, agent_type, job_type, title, status, priority, input_data, parent_job_id
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (job_id, project_id, user_id, agent_type, job_type, title, status, priority, dump_json(input_data or {}), parent_job_id),
+    )
+    cur.execute("select * from public.agent_jobs where id = %s", (job_id,))
+    return job_row_to_dict(cur.fetchone())
+
+
+@with_db
+def update_agent_job(cur, job_id: str, user_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"agent_type", "job_type", "title", "status", "priority", "progress", "input_data", "output_data", "error_text", "parent_job_id", "started_at", "completed_at"}
+    clean = {k: v for k, v in values.items() if k in allowed}
+    if not clean:
+        cur.execute("select * from public.agent_jobs where id = %s and user_id = %s", (job_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job_row_to_dict(row)
+    assignments = []
+    params: List[Any] = []
+    for key, value in clean.items():
+        assignments.append(f"{key} = %s")
+        params.append(dump_json(value) if isinstance(value, (dict, list)) else value)
+    assignments.append("updated_at = now()")
+    params.extend([job_id, user_id])
+    cur.execute(f"update public.agent_jobs set {', '.join(assignments)} where id = %s and user_id = %s", params)
+    cur.execute("select * from public.agent_jobs where id = %s and user_id = %s", (job_id, user_id))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job_row_to_dict(row)
+
+
+@with_db
+def list_agent_jobs(cur, project_id: str, user_id: str) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        select * from public.agent_jobs
+        where project_id = %s and user_id = %s
+        order by created_at desc
+        """,
+        (project_id, user_id),
+    )
+    return [job_row_to_dict(r) for r in cur.fetchall()]
+
+
+@with_db
+def add_project_activity(cur, project_id: str, user_id: Optional[str], activity_type: str, title: str, detail: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    activity_id = str(uuid.uuid4())
+    cur.execute(
+        """
+        insert into public.project_activity_logs (id, project_id, user_id, activity_type, title, detail, meta)
+        values (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (activity_id, project_id, user_id, activity_type, title, detail, dump_json(meta or {})),
+    )
+    cur.execute("select * from public.project_activity_logs where id = %s", (activity_id,))
+    return activity_row_to_dict(cur.fetchone())
+
+
+@with_db
+def list_project_activity(cur, project_id: str, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        select * from public.project_activity_logs
+        where project_id = %s and (user_id = %s or user_id is null)
+        order by created_at desc
+        limit %s
+        """,
+        (project_id, user_id, max(1, min(limit, 500))),
+    )
+    return [activity_row_to_dict(r) for r in cur.fetchall()]
+
+
+def save_binary_image_versions(image_bytes: bytes, title: str, policy: Dict[str, Any], folder_name: str = "visuals") -> Dict[str, str]:
+    folder = MEDIA_DIR / folder_name
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"{safe_filename(title)}_{uuid.uuid4().hex}"
+    master_path = folder / f"{stem}_master.png"
+    master_path.write_bytes(image_bytes)
+
+    preview_format = str(policy.get("preview_format") or "jpg").lower()
+    preview_path = folder / f"{stem}_preview.{preview_format}"
+    print_format = str(policy.get("print_format") or "png").lower()
+    print_path = folder / f"{stem}_print.{print_format}"
+
+    try:
+        from PIL import Image
+        from PIL import ImageOps
+
+        master_img = Image.open(master_path).convert("RGB")
+
+        pw, ph = parse_size(str(policy.get("preview_size") or "1920x1080"), (1920, 1080))
+        mw, mh = parse_size(str(policy.get("master_size") or "3840x2160"), master_img.size)
+        tw, th = parse_size(str(policy.get("print_size") or "5760x3240"), (5760, 3240))
+
+        if master_img.size != (mw, mh):
+            master_img = master_img.resize((mw, mh), Image.LANCZOS)
+            master_img.save(master_path, format="PNG")
+
+        preview_img = master_img.resize((pw, ph), Image.LANCZOS)
+        if preview_format in {"jpg", "jpeg"}:
+            preview_img.save(preview_path, format="JPEG", quality=92, optimize=True)
+        else:
+            preview_img.save(preview_path, format=preview_format.upper())
+
+        print_img = master_img.resize((tw, th), Image.LANCZOS)
+        if print_format in {"jpg", "jpeg"}:
+            print_img.save(print_path, format="JPEG", quality=98, optimize=True)
+        else:
+            print_img.save(print_path, format=print_format.upper())
+    except Exception:
+        preview_path.write_bytes(master_path.read_bytes())
+        print_path.write_bytes(master_path.read_bytes())
+
+    preview_rel = relative_public_url(preview_path)
+    master_rel = relative_public_url(master_path)
+    print_rel = relative_public_url(print_path)
+    return {
+        "preview_url": absolute_public_url(preview_rel),
+        "master_url": absolute_public_url(master_rel),
+        "print_url": absolute_public_url(print_rel),
+        "preview_path": preview_rel,
+        "master_path": master_rel,
+        "print_path": print_rel,
+    }
+
+
+def generate_image_asset_sync(prompt: str, title: str, policy: Dict[str, Any], reference_images: Optional[List[str]] = None) -> Dict[str, str]:
+    api = get_openai_client()
+    if api is None:
+        raise HTTPException(status_code=500, detail="OpenAI not configured for image generation")
+    master_size = normalize_visual_size(str(policy.get("master_size") or VISUAL_MASTER_SIZE), VISUAL_MASTER_SIZE)
+    try:
+        result = api.images.generate(
+            model=IMAGE_MODEL,
+            prompt=prompt,
+            size=master_size,
+            quality=policy.get("quality") or IMAGE_QUALITY or "high",
+        )
+        b64 = result.data[0].b64_json
+        if not b64:
+            raise ValueError("Image API returned no b64_json")
+        image_bytes = base64.b64decode(b64)
+        return save_binary_image_versions(image_bytes, title=title, policy=policy, folder_name="visuals")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {exc}")
+
+
+def build_concept_visual_prompts(project: Dict[str, Any], concept: Dict[str, Any], count: int = 3) -> List[str]:
+    count = max(1, min(count, 6))
+    base_prompt = f"""
+Create {count} distinct premium event moodboard prompts as JSON.
+Return a JSON array of strings only.
+Every prompt must target a printable 16:9 concept visual for an event presentation.
+Project name: {project.get('name') or 'Untitled Project'}
+Event type: {project.get('event_type') or 'Event'}
+Selected concept: {dump_json(concept)}
+Brief: {project.get('brief') or ''}
+Analysis: {project.get('analysis') or ''}
+""".strip()
+    try:
+        data = llm_json(
+            "You are a world-class experiential design visual prompt strategist. Return JSON only.",
+            base_prompt,
+        )
+        if isinstance(data, list):
+            prompts = [str(x).strip() for x in data if str(x).strip()]
+            if prompts:
+                return prompts[:count]
+    except Exception:
+        pass
+    summary = concept.get("summary") or project.get("brief") or "premium event concept"
+    style = concept.get("style") or project.get("style_direction") or "cinematic premium"
+    colors = ", ".join(concept.get("colors") or []) or "black, silver, warm white"
+    materials = ", ".join(concept.get("materials") or []) or "premium scenic materials"
+    return [
+        f"Premium 16:9 printable moodboard hero visual for {project.get('name') or 'event'}, inspired by {concept.get('name') or 'selected concept'}, {summary}, style {style}, materials {materials}, colors {colors}, realistic event scenography, rich lighting, high-detail presentation frame, no watermark, no text.",
+        f"Premium 16:9 printable wide-angle event concept visual showing full venue ambience for {project.get('name') or 'event'}, concept {concept.get('name') or 'selected concept'}, cinematic production design, stage, scenic, screen, audience mood, realistic materials, high detail, no text.",
+        f"Premium 16:9 printable close-up concept frame showing materiality, lighting mood, scenic edges, furniture, and brand detailing for {project.get('name') or 'event'}, concept {concept.get('name') or 'selected concept'}, photorealistic presentation quality, no text.",
+    ][:count]
+
+
+def sync_create_visual_asset(project: Dict[str, Any], user_id: str, asset_type: str, title: str, prompt: str, section: Optional[str] = None, job_kind: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    policy = ensure_visual_policy(str(project["id"]), user_id)
+    asset = create_project_asset(
+        str(project["id"]),
+        user_id,
+        asset_type=asset_type,
+        title=title,
+        prompt=prompt,
+        section=section,
+        job_kind=job_kind,
+        source_file_url=source_file_url,
+        status="running",
+        meta={**(meta or {}), "visual_policy": policy},
+    )
+    generated = generate_image_asset_sync(prompt=prompt, title=title, policy=policy)
+    asset = update_project_asset(
+        asset["id"],
+        user_id,
+        {
+            "status": "completed",
+            "preview_url": generated["preview_url"],
+            "master_url": generated["master_url"],
+            "print_url": generated["print_url"],
+            "meta": {**(meta or {}), "visual_policy": policy, "storage": generated},
+        },
+    )
+    add_project_activity(str(project["id"]), user_id, "asset.completed", title, detail=f"{asset_type} generated", meta={"asset_id": asset["id"], "section": section})
+    return asset
+
+
+def queue_agent_job_with_activity(project_id: str, user_id: str, agent_type: str, job_type: str, title: str, priority: int = 5, input_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    job = create_agent_job(project_id, user_id, agent_type=agent_type, job_type=job_type, title=title, priority=priority, input_data=input_data or {})
+    add_project_activity(project_id, user_id, "job.queued", title, detail=f"{agent_type} queued", meta={"job_id": job["id"], "job_type": job_type})
+    return job
+
+
+def create_master_event_manual(project: Dict[str, Any]) -> Dict[str, str]:
+    sections = [
+        {"heading": "Project Overview", "body": f"Project: {project.get('name') or 'Untitled Project'}\nEvent Type: {project.get('event_type') or 'Event'}\nStatus: {project.get('status') or 'draft'}"},
+        {"heading": "Brief", "body": project.get("brief") or "No brief available."},
+        {"heading": "Analysis", "body": project.get("analysis") or "No analysis available."},
+    ]
+    selected = load_json(project.get("selected")) or {}
+    if selected:
+        sections.append({"heading": "Selected Concept", "body": dump_json(selected)})
+    for heading, key in [
+        ("Sound Department", "sound_data"),
+        ("Lighting Department", "lighting_data"),
+        ("Show Runner", "showrunner_data"),
+    ]:
+        data = load_json(project.get(key))
+        if not data:
+            continue
+        pdf_sections = data.get("pdf_sections") if isinstance(data, dict) else None
+        if pdf_sections:
+            sections.extend(_normalize_pdf_sections(pdf_sections, heading))
+        else:
+            sections.append({"heading": heading, "body": dump_json(data)})
+    assets = list_project_assets(str(project["id"]), str(project["user_id"]))
+    if assets:
+        body_lines = []
+        for a in assets[:100]:
+            body_lines.append(f"{a.get('asset_type')}: {a.get('title')}\nPreview: {a.get('preview_url') or '-'}\nMaster: {a.get('master_url') or '-'}\nPrint: {a.get('print_url') or '-'}")
+        sections.append({"heading": "Generated Assets", "body": "\n\n".join(body_lines)})
+    return create_simple_pdf(f"Master Event Manual - {project.get('name') or 'Project'}", sections, "master_event_manual")
+
+
+def update_project_media_rollups(project_id: str, user_id: str) -> Dict[str, Any]:
+    assets = list_project_assets(project_id, user_id)
+    images = [
+        {
+            "id": a["id"],
+            "title": a.get("title"),
+            "preview_url": a.get("preview_url"),
+            "master_url": a.get("master_url"),
+            "print_url": a.get("print_url"),
+            "status": a.get("status"),
+            "asset_type": a.get("asset_type"),
+            "section": a.get("section"),
+        }
+        for a in assets if a.get("asset_type") in {"moodboard", "image", "2d_graphic", "reference"}
+    ]
+    render3d = [
+        {
+            "id": a["id"],
+            "title": a.get("title"),
+            "preview_url": a.get("preview_url"),
+            "master_url": a.get("master_url"),
+            "print_url": a.get("print_url"),
+            "status": a.get("status"),
+            "asset_type": a.get("asset_type"),
+            "section": a.get("section"),
+        }
+        for a in assets if a.get("asset_type") in {"3d_render", "scene_preview"}
+    ]
+    return update_project_fields(project_id, user_id, {"images": images, "render3d": render3d})
+
+
+@app.get("/projects/{project_id}/visual-policy")
+def get_visual_policy_endpoint(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    policy = ensure_visual_policy(project_id, str(current_user["id"]))
+    return {"project_id": project_id, "visual_policy": policy}
+
+
+@app.post("/projects/{project_id}/visual-policy")
+def set_visual_policy_endpoint(project_id: str, payload: VisualPolicyInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    policy = merged_visual_policy(project)
+    if payload.preview_size:
+        policy["preview_size"] = normalize_visual_size(payload.preview_size, policy["preview_size"])
+    if payload.master_size:
+        policy["master_size"] = normalize_visual_size(payload.master_size, policy["master_size"])
+    if payload.print_size:
+        pw, ph = parse_size(payload.print_size, parse_size(policy.get("print_size") or "5760x3240", (5760, 3240)))
+        if abs((pw / max(ph, 1)) - (16 / 9)) > 0.02:
+            pw = int(round(ph * 16 / 9))
+        policy["print_size"] = f"{pw}x{ph}"
+    if payload.aspect_ratio:
+        policy["aspect_ratio"] = payload.aspect_ratio
+    project = update_project_fields(project_id, str(current_user["id"]), {"visual_policy": policy})
+    add_project_activity(project_id, str(current_user["id"]), "visual_policy.updated", "Visual policy updated", meta={"visual_policy": policy})
+    return {"message": "Visual policy updated", "project": project, "visual_policy": policy}
+
+
+@app.get("/projects/{project_id}/assets")
+def list_assets_endpoint(project_id: str, section: Optional[str] = Query(default=None), current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"assets": list_project_assets(project_id, str(current_user["id"]), section=section)}
+
+
+@app.get("/projects/{project_id}/jobs")
+def list_jobs_endpoint(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"jobs": list_agent_jobs(project_id, str(current_user["id"]))}
+
+
+@app.get("/projects/{project_id}/activity")
+def list_activity_endpoint(project_id: str, limit: int = Query(default=100, ge=1, le=500), current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"activity": list_project_activity(project_id, str(current_user["id"]), limit=limit)}
+
+
+@app.post("/projects/{project_id}/assets/upload-reference")
+async def upload_reference_asset(
+    project_id: str,
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(default=None),
+    section: Optional[str] = Form(default="references"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    suffix = Path(file.filename or "reference.bin").suffix or ".bin"
+    saved_path = UPLOAD_DIR / f"reference_{uuid.uuid4().hex}{suffix}"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    saved_path.write_bytes(content)
+    rel = relative_public_url(saved_path)
+    asset = create_project_asset(
+        project_id,
+        str(current_user["id"]),
+        asset_type="reference",
+        title=title or (file.filename or "Reference Asset"),
+        prompt="",
+        section=section,
+        job_kind="upload",
+        status="completed",
+        preview_url=absolute_public_url(rel),
+        master_url=absolute_public_url(rel),
+        print_url=absolute_public_url(rel),
+        source_file_url=absolute_public_url(rel),
+        meta={"filename": file.filename, "content_type": file.content_type, "size_bytes": len(content)},
+    )
+    update_project_media_rollups(project_id, str(current_user["id"]))
+    add_project_activity(project_id, str(current_user["id"]), "asset.uploaded", asset["title"], detail="Reference asset uploaded", meta={"asset_id": asset["id"]})
+    return {"message": "Reference uploaded", "asset": asset}
+
+
+@app.post("/projects/{project_id}/assets/generate")
+def generate_asset_endpoint(project_id: str, payload: AssetCreateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.generate_now and payload.asset_type in {"moodboard", "image", "2d_graphic", "scene_preview", "3d_render"}:
+        asset = sync_create_visual_asset(project, user_id, payload.asset_type, payload.title, payload.prompt, section=payload.section, job_kind=payload.job_kind)
+        update_project_media_rollups(project_id, user_id)
+        return {"message": "Asset generated", "asset": asset}
+    asset = create_project_asset(project_id, user_id, payload.asset_type, payload.title, payload.prompt, payload.section, payload.job_kind, status="queued", meta={"queued_only": True})
+    job = queue_agent_job_with_activity(project_id, user_id, agent_type=payload.asset_type, job_type=payload.job_kind or "asset_generation", title=payload.title, input_data={"asset_id": asset["id"], "prompt": payload.prompt})
+    return {"message": "Asset queued", "asset": asset, "job": job}
+
+
+@app.post("/projects/{project_id}/moodboards/generate")
+def generate_moodboards_endpoint(project_id: str, payload: MoodboardGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    concepts = load_json(project.get("concepts")) or []
+    if not concepts:
+        raise HTTPException(status_code=400, detail="Run pipeline first to generate concepts")
+    idx = payload.concept_index if payload.concept_index is not None else 0
+    if idx < 0 or idx >= len(concepts):
+        raise HTTPException(status_code=400, detail="Invalid concept index")
+    concept = concepts[idx]
+    prompts = build_concept_visual_prompts(project, concept, count=payload.count)
+    assets = []
+    queued_jobs = []
+    for i, prompt in enumerate(prompts, start=1):
+        title = f"{concept.get('name') or 'Concept'} Moodboard {i}"
+        if payload.generate_now:
+            assets.append(sync_create_visual_asset(project, user_id, "moodboard", title, prompt, section="moodboards", job_kind="concept_moodboard", meta={"concept_index": idx}))
+        else:
+            asset = create_project_asset(project_id, user_id, "moodboard", title, prompt, section="moodboards", job_kind="concept_moodboard", status="queued", meta={"concept_index": idx})
+            assets.append(asset)
+            queued_jobs.append(queue_agent_job_with_activity(project_id, user_id, "moodboard_agent", "concept_moodboard", title, input_data={"asset_id": asset["id"], "prompt": prompt, "concept_index": idx}))
+    update_project_media_rollups(project_id, user_id)
+    update_project_fields(project_id, user_id, {"moodboard": assets[0].get("preview_url") if assets else project.get("moodboard")})
+    return {"message": "Moodboards processed", "assets": assets, "jobs": queued_jobs}
+
+
+@app.post("/projects/{project_id}/orchestrate")
+def orchestrate_project_endpoint(project_id: str, payload: OrchestrateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_visual_policy(project_id, user_id)
+    orchestration_summary = {
+        "queued_at": now_iso(),
+        "auto_generate_moodboard": payload.auto_generate_moodboard,
+        "queue_3d": payload.queue_3d,
+        "queue_video": payload.queue_video,
+        "queue_cad": payload.queue_cad,
+        "queue_manuals": payload.queue_manuals,
+    }
+    jobs = []
+    if payload.auto_generate_moodboard:
+        try:
+            moodboard_result = generate_moodboards_endpoint(project_id, MoodboardGenerateInput(generate_now=True, count=3), current_user)
+            orchestration_summary["moodboards"] = [a.get("id") for a in moodboard_result.get("assets", [])]
+        except Exception as exc:
+            orchestration_summary["moodboards_error"] = str(exc)
+    if payload.queue_3d:
+        jobs.append(queue_agent_job_with_activity(project_id, user_id, "scene_agent", "scene_json", "Generate 3D scene JSON", input_data={"project_id": project_id}))
+        jobs.append(queue_agent_job_with_activity(project_id, user_id, "render_agent", "blender_render", "Generate multi-angle 3D renders", input_data={"project_id": project_id, "target_worker": BLENDER_QUEUE_URL or None, "required_views": ["hero_front", "hero_three_quarter", "top_angle", "wide_venue", "closeup_detail"]}))
+    if payload.queue_video:
+        jobs.append(queue_agent_job_with_activity(project_id, user_id, "video_agent", "screen_movie", "Generate screen movie and sound bed", input_data={"project_id": project_id, "target_worker": VIDEO_QUEUE_URL or None}))
+    if payload.queue_cad:
+        jobs.append(queue_agent_job_with_activity(project_id, user_id, "cad_agent", "layout_trace", "Trace layout and create CAD package", input_data={"project_id": project_id, "target_worker": CAD_QUEUE_URL or None}))
+    if payload.queue_manuals:
+        jobs.append(queue_agent_job_with_activity(project_id, user_id, "manual_agent", "master_manual", "Generate master event manual", input_data={"project_id": project_id}))
+    project = update_project_fields(project_id, user_id, {"orchestration_data": orchestration_summary})
+    add_project_activity(project_id, user_id, "orchestration.updated", "Project orchestration updated", meta=orchestration_summary)
+    return {"message": "Project orchestration upgraded", "project": project, "jobs": jobs, "orchestration": orchestration_summary}
+
+
+@app.post("/projects/{project_id}/jobs")
+def create_job_endpoint(project_id: str, payload: JobQueueInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    job = queue_agent_job_with_activity(project_id, user_id, payload.agent_type, payload.job_type, payload.title or f"{payload.agent_type} - {payload.job_type}", priority=payload.priority, input_data=payload.input_data or {})
+    return {"message": "Job queued", "job": job}
+
+
+@app.post("/projects/{project_id}/manuals/master/pdf")
+def export_master_manual_endpoint(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    pdf = create_master_event_manual(project)
+    add_project_activity(project_id, str(current_user["id"]), "manual.generated", "Master event manual generated", meta=pdf)
+    return {"project_id": project_id, **pdf}
+
+
+@app.post("/project/{project_id}/show-console/jump")
+def show_console_jump(project_id: str, payload: CueJumpInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    showrunner = project.get("showrunner_data") or {}
+    cues = showrunner.get("console_cues") or []
+    if not cues:
+        raise HTTPException(status_code=400, detail="No console cues found")
+    idx = payload.cue_index
+    if payload.cue_no is not None:
+        matches = [i for i, cue in enumerate(cues) if str(cue.get("cue_no")) == str(payload.cue_no)]
+        if not matches:
+            raise HTTPException(status_code=404, detail="Cue number not found")
+        idx = matches[0]
+    if idx is None:
+        raise HTTPException(status_code=422, detail="cue_index or cue_no is required")
+    if idx < 0 or idx >= len(cues):
+        raise HTTPException(status_code=400, detail="Cue index out of range")
+    state = get_console_state(project)
+    state["console_index"] = idx
+    state = log_console_event(state, {"status": "jump", "message": "Jumped to cue", "cue_index": idx, "cue": cues[idx]})
+    project = save_console_state(project_id, user_id, state)
+    return {"message": "Jumped to cue", "cue_index": idx, "cue": cues[idx], "department_outputs": project.get("department_outputs")}
+
+
+@app.get("/project/{project_id}/show-console/history")
+def show_console_history(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    state = get_console_state(project)
+    return {"execution_log": state.get("execution_log") or []}
+
 
 
 if __name__ == "__main__":
