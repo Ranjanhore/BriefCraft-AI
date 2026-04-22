@@ -1745,6 +1745,16 @@ class MoodboardGenerateInput(BaseModel):
     count: int = Field(default=3, ge=1, le=6)
     generate_now: bool = True
 
+class Scene3DGenerateInput(BaseModel):
+    venue_type: Optional[str] = None
+    use_uploaded_references: bool = True
+    include_cameras: bool = True
+
+
+class Render3DGenerateInput(BaseModel):
+    views: List[str] = Field(default_factory=lambda: ["hero", "top", "wide"])
+    generate_now: bool = False
+
 
 class JobQueueInput(BaseModel):
     agent_type: str
@@ -2987,6 +2997,147 @@ Analysis: {project.get('analysis') or ''}
         f"Premium 16:9 printable wide-angle event concept visual showing full venue ambience for {project.get('name') or 'event'}, concept {concept.get('name') or 'selected concept'}, cinematic production design, stage, scenic, screen, audience mood, realistic materials, high detail, no text.",
         f"Premium 16:9 printable close-up concept frame showing materiality, lighting mood, scenic edges, furniture, and brand detailing for {project.get('name') or 'event'}, concept {concept.get('name') or 'selected concept'}, photorealistic presentation quality, no text.",
     ][:count]
+
+def build_scene_3d_json(project: Dict[str, Any], venue_type: Optional[str] = None) -> Dict[str, Any]:
+    selected = load_json(project.get("selected")) or {}
+    return {
+        "project_id": str(project["id"]),
+        "concept_name": selected.get("name"),
+        "venue_type": venue_type or "generic indoor venue",
+        "units": "mm",
+        "stage": {
+            "width": 18000,
+            "depth": 9000,
+            "height": 1200
+        },
+        "screens": [
+            {"name": "main_led", "width": 12000, "height": 4500, "x": 0, "y": 0, "z": 2500}
+        ],
+        "scenic_elements": [
+            {"name": "hero_portal", "type": "arch", "x": 0, "y": 1200, "z": 0}
+        ],
+        "lighting_positions": [
+            {"name": "front_truss", "type": "truss", "x": 0, "y": -4000, "z": 7000}
+        ],
+        "cameras": [
+            {"view": "hero", "label": "Front Hero View"},
+            {"view": "top", "label": "Top View"},
+            {"view": "wide", "label": "Wide Venue View"},
+            {"view": "closeup", "label": "Close-up Detail View"}
+        ]
+    }
+
+@app.post("/projects/{project_id}/scene-3d/generate")
+def generate_scene_3d(project_id: str, payload: Scene3DGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    scene = build_scene_3d_json(project, payload.venue_type)
+    project = update_project_fields(project_id, user_id, {"scene_json": scene})
+
+    add_project_activity(
+        project_id,
+        user_id,
+        "scene_3d.generated",
+        "3D Scene JSON",
+        detail="3D scene generated",
+        meta={"scene_keys": list(scene.keys())},
+    )
+
+    return {
+        "message": "3D scene generated",
+        "project_id": project_id,
+        "scene_json": scene,
+    }
+
+
+@app.post("/projects/{project_id}/renders-3d/generate")
+def generate_renders_3d(project_id: str, payload: Render3DGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.get("scene_json"):
+        raise HTTPException(status_code=400, detail="Generate scene_json first")
+
+    assets = []
+    jobs = []
+
+    for view in payload.views:
+        title = f"{view.title()} Render"
+        prompt = f"Photorealistic 3D render for {project.get('name')}, camera view: {view}"
+
+        asset = create_project_asset(
+            project_id,
+            user_id,
+            asset_type="3d_render",
+            title=title,
+            prompt=prompt,
+            section="renders_3d",
+            job_kind=view,
+            status="queued",
+            meta={"view": view},
+        )
+        assets.append(asset)
+
+        job = queue_agent_job_with_activity(
+            project_id,
+            user_id,
+            "render_3d_agent",
+            view,
+            title,
+            input_data={
+                "asset_id": asset["id"],
+                "scene_json": project.get("scene_json"),
+                "view": view,
+            },
+        )
+        jobs.append(job)
+
+    return {
+        "message": "3D render jobs queued",
+        "assets": assets,
+        "jobs": jobs,
+    }
+
+
+@app.get("/projects/{project_id}/renders-3d")
+def list_renders_3d(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    assets = list_project_assets(project_id, user_id)
+    filtered = [a for a in assets if a.get("asset_type") in {"3d_render", "scene_preview"}]
+
+    return {
+        "project_id": project_id,
+        "assets": filtered,
+    }
+
+
+@app.get("/projects/{project_id}/renders-3d/status")
+def render_3d_status(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    assets = list_project_assets(project_id, user_id)
+    jobs = list_agent_jobs(project_id, user_id)
+
+    render_assets = [a for a in assets if a.get("asset_type") == "3d_render"]
+    render_jobs = [j for j in jobs if j.get("agent_name") == "render_3d_agent"]
+
+    return {
+        "project_id": project_id,
+        "scene_json_ready": bool(project.get("scene_json")),
+        "assets": render_assets,
+        "jobs": render_jobs,
+    }
 
 
 def sync_create_visual_asset(
