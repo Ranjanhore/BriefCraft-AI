@@ -559,10 +559,29 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
         return project
 
     allowed = {
-    "name", "event_type", "style_direction", "status", "brief", "analysis", "concepts", "selected",
-    "moodboard", "images", "render3d", "cad", "scene_json", "deliverables", "dimensions",
-    "brand_data", "presentation_data", "sound_data", "lighting_data", "showrunner_data",
-    "department_outputs", "visual_policy", "orchestration_data",
+    "name",
+    "event_type",
+    "style_direction",
+    "status",
+    "brief",
+    "analysis",
+    "concepts",
+    "selected",
+    "moodboard",
+    "images",
+    "render3d",
+    "cad",
+    "scene_json",
+    "deliverables",
+    "dimensions",
+    "brand_data",
+    "presentation_data",
+    "sound_data",
+    "lighting_data",
+    "showrunner_data",
+    "department_outputs",
+    "visual_policy",
+    "orchestration_data",
 }
 
     clean = {k: v for k, v in values.items() if k in allowed}
