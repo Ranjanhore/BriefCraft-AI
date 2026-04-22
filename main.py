@@ -7,6 +7,7 @@ import socket
 import struct
 import base64
 import datetime as dt
+from math import ceil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from html import escape
@@ -244,6 +245,7 @@ def project_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         "concepts", "selected", "images", "render3d", "scene_json", "deliverables",
         "dimensions", "brand_data", "presentation_data", "sound_data", "lighting_data",
         "showrunner_data", "department_outputs", "visual_policy", "orchestration_data",
+        "element_sheet",
     ):
         if key in item:
             item[key] = load_json(item.get(key))
@@ -253,179 +255,39 @@ def project_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 def voice_message_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return dict(row)
 
-
 # ------------------------------------------------------------------------------
 # DATABASE SETUP
 # ------------------------------------------------------------------------------
-def create_tables() -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("create extension if not exists pgcrypto;")
-
-            cur.execute("""
-                create table if not exists public.users (
-                    id uuid primary key,
-                    email text unique not null,
-                    password text not null,
-                    full_name text,
-                    role text not null default 'user',
-                    is_active boolean not null default true,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.projects (
-                    id uuid primary key,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    name text not null default 'Untitled Project',
-                    event_type text,
-                    style_direction text,
-                    status text not null default 'draft',
-                    brief text,
-                    analysis text,
-                    concepts jsonb,
-                    selected jsonb,
-                    moodboard text,
-                    images jsonb,
-                    render3d jsonb,
-                    cad text,
-                    scene_json jsonb,
-                    deliverables jsonb,
-                    dimensions jsonb,
-                    brand_data jsonb,
-                    presentation_data jsonb,
-                    sound_data jsonb,
-                    lighting_data jsonb,
-                    showrunner_data jsonb,
-                    department_outputs jsonb,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            for stmt in [
-                "alter table public.projects add column if not exists style_direction text;",
-                "alter table public.projects add column if not exists brief text;",
-                "alter table public.projects add column if not exists analysis text;",
-                "alter table public.projects add column if not exists concepts jsonb;",
-                "alter table public.projects add column if not exists selected jsonb;",
-                "alter table public.projects add column if not exists sound_data jsonb;",
-                "alter table public.projects add column if not exists lighting_data jsonb;",
-                "alter table public.projects add column if not exists showrunner_data jsonb;",
-                "alter table public.projects add column if not exists department_outputs jsonb;",
-                "alter table public.projects add column if not exists visual_policy jsonb;",
-                "alter table public.projects add column if not exists orchestration_data jsonb;",
-                "alter table public.projects add column if not exists updated_at timestamptz not null default now();",
-            ]:
-                cur.execute(stmt)
-
-            cur.execute("""
-                create table if not exists public.project_versions (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    version_no int not null,
-                    snapshot jsonb,
-                    note text,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_comments (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    section text,
-                    comment_text text,
-                    status text not null default 'open',
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.voice_sessions (
-                    id uuid primary key,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    project_id uuid references public.projects(id) on delete set null,
-                    title text not null default 'Voice Session',
-                    system_prompt text,
-                    voice text,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.voice_messages (
-                    id uuid primary key,
-                    session_id uuid not null references public.voice_sessions(id) on delete cascade,
-                    role text not null,
-                    content text,
-                    transcript text,
-                    audio_url text,
-                    meta jsonb,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_assets (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    asset_type text not null,
-                    section text,
-                    job_kind text,
-                    title text not null default 'Untitled Asset',
-                    prompt text,
-                    status text not null default 'queued',
-                    preview_url text,
-                    master_url text,
-                    print_url text,
-                    source_file_url text,
-                    meta jsonb,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.agent_jobs (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    agent_type text not null,
-                    job_type text not null,
-                    title text not null default 'Agent Job',
-                    status text not null default 'queued',
-                    priority int not null default 5,
-                    progress numeric(5,2) not null default 0,
-                    input_data jsonb,
-                    output_data jsonb,
-                    error_text text,
-                    parent_job_id uuid,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now(),
-                    started_at timestamptz,
-                    completed_at timestamptz
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_activity_logs (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid references public.users(id) on delete set null,
-                    activity_type text not null,
-                    title text not null,
-                    detail text,
-                    meta jsonb,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
+cur.execute("""
+    create table if not exists public.projects (
+        id uuid primary key,
+        user_id uuid not null references public.users(id) on delete cascade,
+        name text not null default 'Untitled Project',
+        event_type text,
+        style_direction text,
+        status text not null default 'draft',
+        brief text,
+        analysis text,
+        concepts jsonb,
+        selected jsonb,
+        moodboard text,
+        images jsonb,
+        render3d jsonb,
+        cad text,
+        scene_json jsonb,
+        deliverables jsonb,
+        dimensions jsonb,
+        brand_data jsonb,
+        presentation_data jsonb,
+        sound_data jsonb,
+        lighting_data jsonb,
+        showrunner_data jsonb,
+        department_outputs jsonb,
+        element_sheet jsonb,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+    );
+""")
 
 # ------------------------------------------------------------------------------
 # AUTH + USERS
@@ -559,7 +421,7 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
             raise HTTPException(status_code=404, detail="Project not found")
         return project
 
-    allowed = {
+  allowed = {
     "name",
     "event_type",
     "style_direction",
@@ -583,6 +445,7 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
     "department_outputs",
     "visual_policy",
     "orchestration_data",
+    "element_sheet",
 }
 
     clean = {k: v for k, v in values.items() if k in allowed}
@@ -607,7 +470,6 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
-
 
 @with_db
 def snapshot_project_version(cur, project_id: str, user_id: str, note: str = "") -> None:
@@ -1754,6 +1616,28 @@ class Scene3DGenerateInput(BaseModel):
 class Render3DGenerateInput(BaseModel):
     views: List[str] = Field(default_factory=lambda: ["hero", "top", "wide"])
     generate_now: bool = False
+
+class ElementSheetGenerateInput(BaseModel):
+    include_sound: bool = True
+    include_lighting: bool = True
+    include_scenic: bool = True
+    include_power_summary: bool = True
+    include_xlsx: bool = True
+    sheet_title: Optional[str] = None
+
+class WorkerJobCompleteInput(BaseModel):
+    user_id: str
+    asset_id: str
+    preview_url: Optional[str] = None
+    master_url: Optional[str] = None
+    print_url: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+
+
+class WorkerJobFailInput(BaseModel):
+    user_id: str
+    asset_id: str
+    error_text: str
 
 
 class JobQueueInput(BaseModel):
@@ -3027,6 +2911,28 @@ def build_scene_3d_json(project: Dict[str, Any], venue_type: Optional[str] = Non
         ]
     }
 
+def claim_next_render_job(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    jobs = list_agent_jobs(project_id, user_id)
+    queued = [
+        j for j in jobs
+        if j.get("agent_type") == "render_3d_agent" and j.get("status") == "queued"
+    ]
+    if not queued:
+        return None
+
+    queued.sort(key=lambda j: (j.get("priority", 5), j.get("created_at") or ""))
+    job = queued[0]
+
+    return update_agent_job(
+        job["id"],
+        user_id,
+        {
+            "status": "running",
+            "progress": 10,
+            "started_at": now_iso(),
+        },
+    )
+
 @app.post("/projects/{project_id}/scene-3d/generate")
 def generate_scene_3d(project_id: str, payload: Scene3DGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = str(current_user["id"])
@@ -3050,6 +2956,157 @@ def generate_scene_3d(project_id: str, payload: Scene3DGenerateInput, current_us
         "message": "3D scene generated",
         "project_id": project_id,
         "scene_json": scene,
+    }
+
+@app.post("/worker/projects/{project_id}/jobs/render-3d/next")
+def worker_claim_next_render_job(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    job = claim_next_render_job(project_id, user_id)
+    if not job:
+        return {
+            "message": "No queued render jobs",
+            "project_id": project_id,
+            "job": None,
+        }
+
+    input_data = load_json(job.get("input_data")) or {}
+    asset_id = input_data.get("asset_id")
+    asset = get_project_asset_by_id(asset_id, user_id) if asset_id else None
+
+    if asset:
+        update_project_asset(
+            asset["id"],
+            user_id,
+            {
+                "status": "running",
+            },
+        )
+
+    add_project_activity(
+        project_id,
+        user_id,
+        "job.running",
+        job.get("title") or "3D Render Job",
+        detail="3D render job claimed by worker",
+        meta={"job_id": job["id"], "asset_id": asset_id},
+    )
+
+    return {
+        "message": "Render job claimed",
+        "project_id": project_id,
+        "job": job,
+        "asset": asset,
+    }
+
+
+@app.post("/worker/jobs/{job_id}/complete")
+def worker_complete_job(
+    job_id: str,
+    payload: WorkerJobCompleteInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    operator_user_id = str(current_user["id"])
+    job = update_agent_job(
+        job_id,
+        payload.user_id,
+        {
+            "status": "completed",
+            "progress": 100,
+            "completed_at": now_iso(),
+            "output_data": {
+                "preview_url": payload.preview_url,
+                "master_url": payload.master_url,
+                "print_url": payload.print_url,
+                "meta": payload.meta or {},
+                "completed_by": operator_user_id,
+            },
+        },
+    )
+
+    asset = update_project_asset(
+        payload.asset_id,
+        payload.user_id,
+        {
+            "status": "completed",
+            "preview_url": payload.preview_url,
+            "master_url": payload.master_url,
+            "print_url": payload.print_url,
+            "meta": {
+                "worker_output": payload.meta or {},
+                "completed_by": operator_user_id,
+            },
+        },
+    )
+
+    add_project_activity(
+        asset["project_id"],
+        payload.user_id,
+        "job.completed",
+        asset.get("title") or job.get("title") or "Worker Job",
+        detail="Worker marked render job completed",
+        meta={"job_id": job_id, "asset_id": payload.asset_id},
+    )
+
+    return {
+        "message": "Job completed",
+        "job": job,
+        "asset": asset,
+    }
+
+
+@app.post("/worker/jobs/{job_id}/fail")
+def worker_fail_job(
+    job_id: str,
+    payload: WorkerJobFailInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    operator_user_id = str(current_user["id"])
+    job = update_agent_job(
+        job_id,
+        payload.user_id,
+        {
+            "status": "failed",
+            "progress": 0,
+            "completed_at": now_iso(),
+            "error_text": payload.error_text,
+            "output_data": {
+                "failed_by": operator_user_id,
+            },
+        },
+    )
+
+    asset = update_project_asset(
+        payload.asset_id,
+        payload.user_id,
+        {
+            "status": "failed",
+            "meta": {
+                "error_text": payload.error_text,
+                "failed_by": operator_user_id,
+            },
+        },
+    )
+
+    add_project_activity(
+        asset["project_id"],
+        payload.user_id,
+        "job.failed",
+        asset.get("title") or job.get("title") or "Worker Job",
+        detail=payload.error_text,
+        meta={"job_id": job_id, "asset_id": payload.asset_id},
+    )
+
+    return {
+        "message": "Job failed",
+        "job": job,
+        "asset": asset,
     }
 
 
