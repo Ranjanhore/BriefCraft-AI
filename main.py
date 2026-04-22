@@ -2989,19 +2989,30 @@ Analysis: {project.get('analysis') or ''}
     ][:count]
 
 
-def sync_create_visual_asset(project: Dict[str, Any], user_id: str, asset_type: str, title: str, prompt: str, section: Optional[str] = None, job_kind: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def sync_create_visual_asset(
+    project: Dict[str, Any],
+    user_id: str,
+    asset_type: str,
+    title: str,
+    prompt: str,
+    section: Optional[str] = None,
+    job_kind: Optional[str] = None,
+    source_file_url: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     policy = ensure_visual_policy(str(project["id"]), user_id)
 
-if asset_type == "moodboard":
-    policy = {
-        **policy,
-        "preview_size": "1280x720",
-        "master_size": "1920x1080",
-        "print_size": "1920x1080",
-        "preview_format": "jpg",
-        "master_format": "png",
-        "print_format": "png",
-    }
+    if asset_type == "moodboard":
+        policy = {
+            **policy,
+            "preview_size": "1280x720",
+            "master_size": "1920x1080",
+            "print_size": "1920x1080",
+            "preview_format": "jpg",
+            "master_format": "png",
+            "print_format": "png",
+        }
+
     asset = create_project_asset(
         str(project["id"]),
         user_id,
@@ -3014,7 +3025,13 @@ if asset_type == "moodboard":
         status="running",
         meta={**(meta or {}), "visual_policy": policy},
     )
-    generated = generate_image_asset_sync(prompt=prompt, title=title, policy=policy)
+
+    generated = generate_image_asset_sync(
+        prompt=prompt,
+        title=title,
+        policy=policy,
+    )
+
     asset = update_project_asset(
         asset["id"],
         user_id,
@@ -3023,12 +3040,24 @@ if asset_type == "moodboard":
             "preview_url": generated["preview_url"],
             "master_url": generated["master_url"],
             "print_url": generated["print_url"],
-            "meta": {**(meta or {}), "visual_policy": policy, "storage": generated},
+            "meta": {
+                **(meta or {}),
+                "visual_policy": policy,
+                "storage": generated,
+            },
         },
     )
-    add_project_activity(str(project["id"]), user_id, "asset.completed", title, detail=f"{asset_type} generated", meta={"asset_id": asset["id"], "section": section})
-    return asset
 
+    add_project_activity(
+        str(project["id"]),
+        user_id,
+        "asset.completed",
+        title,
+        detail=f"{asset_type} generated",
+        meta={"asset_id": asset["id"], "section": section},
+    )
+
+    return asset
 
 def queue_agent_job_with_activity(project_id: str, user_id: str, agent_type: str, job_type: str, title: str, priority: int = 5, input_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     job = create_agent_job(project_id, user_id, agent_type=agent_type, job_type=job_type, title=title, priority=priority, input_data=input_data or {})
