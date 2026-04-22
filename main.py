@@ -258,36 +258,26 @@ def voice_message_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 # ------------------------------------------------------------------------------
 # DATABASE SETUP
 # ------------------------------------------------------------------------------
-cur.execute("""
-    create table if not exists public.projects (
-        id uuid primary key,
-        user_id uuid not null references public.users(id) on delete cascade,
-        name text not null default 'Untitled Project',
-        event_type text,
-        style_direction text,
-        status text not null default 'draft',
-        brief text,
-        analysis text,
-        concepts jsonb,
-        selected jsonb,
-        moodboard text,
-        images jsonb,
-        render3d jsonb,
-        cad text,
-        scene_json jsonb,
-        deliverables jsonb,
-        dimensions jsonb,
-        brand_data jsonb,
-        presentation_data jsonb,
-        sound_data jsonb,
-        lighting_data jsonb,
-        showrunner_data jsonb,
-        department_outputs jsonb,
-        element_sheet jsonb,
-        created_at timestamptz not null default now(),
-        updated_at timestamptz not null default now()
-    );
-""")
+def create_tables() -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("create extension if not exists pgcrypto;")
+
+            cur.execute("""
+                create table if not exists public.projects (
+                    ...
+                    department_outputs jsonb,
+                    element_sheet jsonb,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+            """)
+
+            for stmt in [
+                "alter table public.projects add column if not exists element_sheet jsonb;",
+                ...
+            ]:
+                cur.execute(stmt)
 
 # ------------------------------------------------------------------------------
 # AUTH + USERS
