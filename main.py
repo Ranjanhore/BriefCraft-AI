@@ -675,10 +675,17 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
 
 
 @with_db
-def create_project(cur, user_id: str, name: Optional[str] = None, event_type: Optional[str] = None) -> str:
-    # Defensive self-heal: make sure the referenced user row exists in the same DB
-    # before inserting the project. This avoids stale-token / partially-migrated-state
-    # failures and gives a clearer error if the token user truly is missing.
+def create_project(
+    cur,
+    user_id: str,
+    name: Optional[str] = None,
+    event_type: Optional[str] = None,
+    email: Optional[str] = None,
+    full_name: Optional[str] = None,
+) -> str:
+    # Self-heal the local users table on the same DB connection before project insert.
+    # This prevents foreign-key failures when a valid authenticated user exists but the
+    # public.users row is missing or out of sync.
     cur.execute(
         """
         select id, email, full_name, role, is_active
@@ -688,8 +695,34 @@ def create_project(cur, user_id: str, name: Optional[str] = None, event_type: Op
         (user_id,),
     )
     existing_user = cur.fetchone()
+
     if not existing_user:
-        raise HTTPException(status_code=401, detail="User record missing for token; please login again")
+        if not email:
+            raise HTTPException(status_code=401, detail="User record missing for token; please login again")
+        cur.execute(
+            """
+            insert into public.users (id, email, password, full_name, role, is_active)
+            values (%s, %s, %s, %s, %s, %s)
+            on conflict (id) do update
+            set email = excluded.email,
+                full_name = coalesce(excluded.full_name, public.users.full_name),
+                is_active = true
+            """,
+            (user_id, email, hash_password(uuid.uuid4().hex), full_name, "user", True),
+        )
+    else:
+        # Keep the local row fresh using the authenticated identity we already trust.
+        if email:
+            cur.execute(
+                """
+                update public.users
+                set email = %s,
+                    full_name = coalesce(%s, full_name),
+                    is_active = true
+                where id = %s
+                """,
+                (email, full_name, user_id),
+            )
 
     project_id = str(uuid.uuid4())
     cur.execute(
@@ -1496,6 +1529,8 @@ def create_project_frontend(payload: ProjectCreateInput, current_user: Dict[str,
         user_id=str(current_user["id"]),
         name=payload.title or best_project_name_from_prompt(payload.brief or "Untitled Project"),
         event_type=payload.event_type,
+        email=current_user.get("email"),
+        full_name=current_user.get("full_name"),
     )
     if payload.brief:
         update_project_field(project_id, "brief", payload.brief)
@@ -1556,6 +1591,8 @@ def run_pipeline(payload: RunInput, current_user: Dict[str, Any] = Depends(get_c
             user_id=user_id,
             name=payload.name or best_project_name_from_prompt(payload.text),
             event_type=payload.event_type,
+            email=current_user.get("email"),
+            full_name=current_user.get("full_name"),
         )
     except HTTPException:
         raise
