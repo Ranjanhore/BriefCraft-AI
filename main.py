@@ -429,6 +429,160 @@ def create_tables() -> None:
                 );
             """)
 
+            cur.execute("""
+                create table if not exists public.projects (
+                    id uuid primary key,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    name text not null default 'Untitled Project',
+                    event_type text,
+                    style_direction text,
+                    status text not null default 'draft',
+                    brief text,
+                    analysis text,
+                    concepts jsonb,
+                    selected jsonb,
+                    moodboard text,
+                    images jsonb,
+                    render3d jsonb,
+                    cad text,
+                    scene_json jsonb,
+                    deliverables jsonb,
+                    dimensions jsonb,
+                    brand_data jsonb,
+                    presentation_data jsonb,
+                    sound_data jsonb,
+                    lighting_data jsonb,
+                    showrunner_data jsonb,
+                    department_outputs jsonb,
+                    element_sheet jsonb,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+            """)
+
+            for stmt in [
+                "alter table public.projects add column if not exists style_direction text;",
+                "alter table public.projects add column if not exists brief text;",
+                "alter table public.projects add column if not exists analysis text;",
+                "alter table public.projects add column if not exists concepts jsonb;",
+                "alter table public.projects add column if not exists selected jsonb;",
+                "alter table public.projects add column if not exists sound_data jsonb;",
+                "alter table public.projects add column if not exists lighting_data jsonb;",
+                "alter table public.projects add column if not exists showrunner_data jsonb;",
+                "alter table public.projects add column if not exists department_outputs jsonb;",
+                "alter table public.projects add column if not exists element_sheet jsonb;",
+                "alter table public.projects add column if not exists visual_policy jsonb;",
+                "alter table public.projects add column if not exists orchestration_data jsonb;",
+                "alter table public.projects add column if not exists updated_at timestamptz not null default now();",
+            ]:
+                cur.execute(stmt)
+
+            cur.execute("""
+                create table if not exists public.project_versions (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    version_no int not null,
+                    snapshot jsonb,
+                    note text,
+                    created_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.project_comments (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    section text,
+                    comment_text text,
+                    status text not null default 'open',
+                    created_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.voice_sessions (
+                    id uuid primary key,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    project_id uuid references public.projects(id) on delete set null,
+                    title text not null default 'Voice Session',
+                    system_prompt text,
+                    voice text,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.voice_messages (
+                    id uuid primary key,
+                    session_id uuid not null references public.voice_sessions(id) on delete cascade,
+                    role text not null,
+                    content text,
+                    transcript text,
+                    audio_url text,
+                    meta jsonb,
+                    created_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.project_assets (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    asset_type text not null,
+                    section text,
+                    job_kind text,
+                    title text not null default 'Untitled Asset',
+                    prompt text,
+                    status text not null default 'queued',
+                    preview_url text,
+                    master_url text,
+                    print_url text,
+                    source_file_url text,
+                    meta jsonb,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.agent_jobs (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid not null references public.users(id) on delete cascade,
+                    agent_type text not null,
+                    job_type text not null,
+                    title text not null default 'Agent Job',
+                    status text not null default 'queued',
+                    priority int not null default 5,
+                    progress numeric(5,2) not null default 0,
+                    input_data jsonb,
+                    output_data jsonb,
+                    error_text text,
+                    parent_job_id uuid,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now(),
+                    started_at timestamptz,
+                    completed_at timestamptz
+                );
+            """)
+
+            cur.execute("""
+                create table if not exists public.project_activity_logs (
+                    id uuid primary key,
+                    project_id uuid not null references public.projects(id) on delete cascade,
+                    user_id uuid references public.users(id) on delete set null,
+                    activity_type text not null,
+                    title text not null,
+                    detail text,
+                    meta jsonb,
+                    created_at timestamptz not null default now()
+                );
+            """)
+
             for stmt in [
                 "alter table public.projects add column if not exists element_sheet jsonb;",
                 ...
