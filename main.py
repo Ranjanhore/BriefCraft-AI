@@ -219,6 +219,14 @@ def safe_json(value: Any) -> Any:
     return value
 
 
+def json_dumps_safe(value: Any) -> str:
+    return json.dumps(value, default=str)
+
+
+def jsonable(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
 def now_iso() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
@@ -494,8 +502,11 @@ def list_projects_for_user(cur, user_id: str) -> List[Dict[str, Any]]:
 def update_project_field(cur, project_id: str, field: str, value: Any) -> None:
     if field not in PROJECT_ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail=f"Invalid project field: {field}")
-    db_value = json.dumps(value) if isinstance(value, (dict, list)) else value
-    cur.execute(f"update public.projects set {field} = %s, updated_at = now() where id = %s", (db_value, project_id))
+    db_value = json_dumps_safe(value) if isinstance(value, (dict, list)) else value
+    cur.execute(
+        f"update public.projects set {field} = %s, updated_at = now() where id = %s",
+        (db_value, project_id),
+    )
 
 
 @with_db
@@ -504,13 +515,27 @@ def snapshot_project_version(cur, project_id: str, user_id: str, note: str = "")
     if not project:
         return
 
-    cur.execute("select coalesce(max(version_no), 0) + 1 as next_version from public.project_versions where project_id = %s", (project_id,))
+    cur.execute(
+        "select coalesce(max(version_no), 0) + 1 as next_version from public.project_versions where project_id = %s",
+        (project_id,),
+    )
     next_version = int(cur.fetchone()["next_version"])
+    snapshot_payload = jsonable(project)
 
-    cur.execute("""
+    cur.execute(
+        """
         insert into public.project_versions (id, project_id, user_id, version_no, snapshot, note)
         values (%s, %s, %s, %s, %s, %s)
-    """, (str(uuid.uuid4()), project_id, user_id, next_version, json.dumps(project), note))
+        """,
+        (
+            str(uuid.uuid4()),
+            project_id,
+            user_id,
+            next_version,
+            json_dumps_safe(snapshot_payload),
+            note,
+        ),
+    )
 
 
 @with_db
@@ -537,7 +562,7 @@ def create_render_job(cur, project_id: str, user_id: str, job_type: str, input_j
         insert into public.render_jobs (id, project_id, user_id, job_type, status, input_json)
         values (%s, %s, %s, %s, %s, %s)
         returning id
-    """, (job_id, project_id, user_id, job_type, "queued", json.dumps(input_json)))
+    """, (job_id, project_id, user_id, job_type, "queued", json_dumps_safe(input_json)))
     return str(cur.fetchone()["id"])
 
 
@@ -555,7 +580,7 @@ def update_render_job(cur, job_id: str, status: str, output_json: Any = None, er
         where id = %s
     """, (
         status,
-        json.dumps(output_json) if output_json is not None else None,
+        json_dumps_safe(output_json) if output_json is not None else None,
         error_text,
         started_at,
         finished_at,
@@ -654,7 +679,7 @@ Analysis:
 def generate_moodboard(selected_concept: Any) -> str:
     return llm_text(
         "Create polished moodboard directions for premium event, stage, exhibition, and activation concepts.",
-        f"Concept:\n{json.dumps(selected_concept, indent=2)}",
+        f"Concept:\n{json.dumps(selected_concept, indent=2, default=str)}",
     )
 
 
@@ -666,7 +691,7 @@ Create structured JSON for Blender scene generation.
 Brief:
 {brief}
 Concept:
-{json.dumps(selected_concept, indent=2)}
+{json.dumps(selected_concept, indent=2, default=str)}
 """,
     )
     if not isinstance(result, dict):
@@ -1133,7 +1158,7 @@ def export_sound_pdf(project_id: str, payload: DepartmentPDFRequest, user_id: st
     project = require_project_owner(project_id, user_id)
     if not project.get("sound_data"):
         raise HTTPException(status_code=404, detail="Sound data not found")
-    sections = project["sound_data"].get("pdf_sections") or [{"heading": "Sound Design Manual", "body": json.dumps(project["sound_data"], indent=2)}]
+    sections = project["sound_data"].get("pdf_sections") or [{"heading": "Sound Design Manual", "body": json.dumps(project["sound_data"], indent=2, default=str)}]
     return {"project_id": project_id, "pdf_url": create_simple_pdf(payload.title or "Sound Design Manual", sections, "sound_manual")}
 
 
@@ -1142,7 +1167,7 @@ def export_lighting_pdf(project_id: str, payload: DepartmentPDFRequest, user_id:
     project = require_project_owner(project_id, user_id)
     if not project.get("lighting_data"):
         raise HTTPException(status_code=404, detail="Lighting data not found")
-    sections = project["lighting_data"].get("pdf_sections") or [{"heading": "Lighting Design Manual", "body": json.dumps(project["lighting_data"], indent=2)}]
+    sections = project["lighting_data"].get("pdf_sections") or [{"heading": "Lighting Design Manual", "body": json.dumps(project["lighting_data"], indent=2, default=str)}]
     return {"project_id": project_id, "pdf_url": create_simple_pdf(payload.title or "Lighting Design Manual", sections, "lighting_manual")}
 
 
@@ -1151,7 +1176,7 @@ def export_showrunner_pdf(project_id: str, payload: DepartmentPDFRequest, user_i
     project = require_project_owner(project_id, user_id)
     if not project.get("showrunner_data"):
         raise HTTPException(status_code=404, detail="Show runner data not found")
-    sections = project["showrunner_data"].get("pdf_sections") or [{"heading": "Show Running Script", "body": json.dumps(project["showrunner_data"], indent=2)}]
+    sections = project["showrunner_data"].get("pdf_sections") or [{"heading": "Show Running Script", "body": json.dumps(project["showrunner_data"], indent=2, default=str)}]
     return {"project_id": project_id, "pdf_url": create_simple_pdf(payload.title or "Show Running Script", sections, "showrunner_manual")}
 
 
