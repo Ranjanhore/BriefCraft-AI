@@ -676,6 +676,21 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
 
 @with_db
 def create_project(cur, user_id: str, name: Optional[str] = None, event_type: Optional[str] = None) -> str:
+    # Defensive self-heal: make sure the referenced user row exists in the same DB
+    # before inserting the project. This avoids stale-token / partially-migrated-state
+    # failures and gives a clearer error if the token user truly is missing.
+    cur.execute(
+        """
+        select id, email, full_name, role, is_active
+        from public.users
+        where id = %s
+        """,
+        (user_id,),
+    )
+    existing_user = cur.fetchone()
+    if not existing_user:
+        raise HTTPException(status_code=401, detail="User record missing for token; please login again")
+
     project_id = str(uuid.uuid4())
     cur.execute(
         """
@@ -1536,11 +1551,16 @@ def list_comments(project_id: str, current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/run")
 def run_pipeline(payload: RunInput, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = str(current_user["id"])
-    project_id = payload.project_id or create_project(
-        user_id=user_id,
-        name=payload.name or best_project_name_from_prompt(payload.text),
-        event_type=payload.event_type,
-    )
+    try:
+        project_id = payload.project_id or create_project(
+            user_id=user_id,
+            name=payload.name or best_project_name_from_prompt(payload.text),
+            event_type=payload.event_type,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
