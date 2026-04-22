@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import json
@@ -2636,6 +2637,16 @@ def normalize_visual_size(size: Optional[str], fallback: str) -> str:
         w = int(round(h * 16 / 9))
     return f"{w}x{h}"
 
+def choose_openai_image_size(policy: Dict[str, Any]) -> str:
+    target = normalize_visual_size(str(policy.get("master_size") or VISUAL_MASTER_SIZE), VISUAL_MASTER_SIZE)
+    w, h = parse_size(target, (3840, 2160))
+
+    if w == h:
+        return "1024x1024"
+    if w > h:
+        return "1536x1024"
+    return "1024x1536"
+
 
 def default_visual_policy() -> Dict[str, Any]:
     preview = normalize_visual_size(VISUAL_PREVIEW_SIZE, "1920x1080")
@@ -2842,45 +2853,62 @@ def save_binary_image_versions(image_bytes: bytes, title: str, policy: Dict[str,
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{safe_filename(title)}_{uuid.uuid4().hex}"
     master_path = folder / f"{stem}_master.png"
-    master_path.write_bytes(image_bytes)
 
     preview_format = str(policy.get("preview_format") or "jpg").lower()
     preview_path = folder / f"{stem}_preview.{preview_format}"
+
     print_format = str(policy.get("print_format") or "png").lower()
     print_path = folder / f"{stem}_print.{print_format}"
 
     try:
-        from PIL import Image
-        from PIL import ImageOps
+        from PIL import Image, ImageOps
 
-        master_img = Image.open(master_path).convert("RGB")
+        source_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         pw, ph = parse_size(str(policy.get("preview_size") or "1920x1080"), (1920, 1080))
-        mw, mh = parse_size(str(policy.get("master_size") or "3840x2160"), master_img.size)
+        mw, mh = parse_size(str(policy.get("master_size") or "3840x2160"), (3840, 2160))
         tw, th = parse_size(str(policy.get("print_size") or "5760x3240"), (5760, 3240))
 
-        if master_img.size != (mw, mh):
-            master_img = master_img.resize((mw, mh), Image.LANCZOS)
-            master_img.save(master_path, format="PNG")
+        # Convert generated image into exact 16:9 master without distortion
+        master_img = ImageOps.fit(
+            source_img,
+            (mw, mh),
+            method=Image.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        master_img.save(master_path, format="PNG")
 
-        preview_img = master_img.resize((pw, ph), Image.LANCZOS)
+        preview_img = ImageOps.fit(
+            master_img,
+            (pw, ph),
+            method=Image.LANCZOS,
+            centering=(0.5, 0.5),
+        )
         if preview_format in {"jpg", "jpeg"}:
             preview_img.save(preview_path, format="JPEG", quality=92, optimize=True)
         else:
             preview_img.save(preview_path, format=preview_format.upper())
 
-        print_img = master_img.resize((tw, th), Image.LANCZOS)
+        print_img = ImageOps.fit(
+            master_img,
+            (tw, th),
+            method=Image.LANCZOS,
+            centering=(0.5, 0.5),
+        )
         if print_format in {"jpg", "jpeg"}:
             print_img.save(print_path, format="JPEG", quality=98, optimize=True)
         else:
             print_img.save(print_path, format=print_format.upper())
+
     except Exception:
-        preview_path.write_bytes(master_path.read_bytes())
-        print_path.write_bytes(master_path.read_bytes())
+        master_path.write_bytes(image_bytes)
+        preview_path.write_bytes(image_bytes)
+        print_path.write_bytes(image_bytes)
 
     preview_rel = relative_public_url(preview_path)
     master_rel = relative_public_url(master_path)
     print_rel = relative_public_url(print_path)
+
     return {
         "preview_url": absolute_public_url(preview_rel),
         "master_url": absolute_public_url(master_rel),
@@ -2890,27 +2918,42 @@ def save_binary_image_versions(image_bytes: bytes, title: str, policy: Dict[str,
         "print_path": print_rel,
     }
 
-
 def generate_image_asset_sync(prompt: str, title: str, policy: Dict[str, Any], reference_images: Optional[List[str]] = None) -> Dict[str, str]:
     api = get_openai_client()
     if api is None:
         raise HTTPException(status_code=500, detail="OpenAI not configured for image generation")
-    master_size = normalize_visual_size(str(policy.get("master_size") or VISUAL_MASTER_SIZE), VISUAL_MASTER_SIZE)
+
+    openai_size = choose_openai_image_size(policy)
+
+    final_prompt = (
+        f"{prompt}\n\n"
+        "Composition rules: cinematic widescreen composition, 16:9 presentation-safe framing, "
+        "keep key subjects centered with safe margins for later crop/mastering, "
+        "high-detail premium event visualization, no watermark, no text."
+    )
+
     try:
         result = api.images.generate(
             model=IMAGE_MODEL,
-            prompt=prompt,
-            size=master_size,
+            prompt=final_prompt,
+            size=openai_size,
             quality=policy.get("quality") or IMAGE_QUALITY or "high",
         )
+
         b64 = result.data[0].b64_json
         if not b64:
             raise ValueError("Image API returned no b64_json")
+
         image_bytes = base64.b64decode(b64)
-        return save_binary_image_versions(image_bytes, title=title, policy=policy, folder_name="visuals")
+        return save_binary_image_versions(
+            image_bytes,
+            title=title,
+            policy=policy,
+            folder_name="visuals",
+        )
+
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Image generation failed: {exc}")
-
 
 def build_concept_visual_prompts(project: Dict[str, Any], concept: Dict[str, Any], count: int = 3) -> List[str]:
     count = max(1, min(count, 6))
