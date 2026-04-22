@@ -13,7 +13,7 @@ from psycopg.errors import UniqueViolation, IntegrityError
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, field_validator
 
 from fastapi import FastAPI, HTTPException, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -152,6 +152,11 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def is_valid_email(email: str) -> bool:
+    pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    return bool(re.match(pattern, email))
+
+
 def with_db(fn):
     def wrapper(*args, **kwargs):
         with get_conn() as conn:
@@ -204,7 +209,6 @@ def ensure_schema() -> None:
                 );
             """)
 
-            # Add missing columns safely for older tables
             cur.execute("alter table public.projects add column if not exists style_direction text;")
             cur.execute("alter table public.projects add column if not exists brief text;")
             cur.execute("alter table public.projects add column if not exists analysis text;")
@@ -257,10 +261,6 @@ def ensure_schema() -> None:
                 );
             """)
 
-            # IMPORTANT:
-            # Drop stale FK constraints to users that were causing:
-            # "projects_user_id_fkey violates foreign key constraint"
-            # This keeps auth working but stops project creation from failing due DB drift.
             cur.execute("alter table if exists public.projects drop constraint if exists projects_user_id_fkey;")
             cur.execute("alter table if exists public.project_comments drop constraint if exists project_comments_user_id_fkey;")
             cur.execute("alter table if exists public.project_versions drop constraint if exists project_versions_user_id_fkey;")
@@ -719,9 +719,17 @@ Project:
 # =============================================================================
 
 class UserInput(BaseModel):
-    email: EmailStr
+    email: str
     password: str = Field(min_length=8)
     full_name: Optional[str] = None
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        v = normalize_email(v)
+        if not is_valid_email(v):
+            raise ValueError("Invalid email address")
+        return v
 
 
 class ProjectCreateInput(BaseModel):
@@ -859,7 +867,6 @@ def db_create_project(
     event_type: Optional[str],
     style_direction: Optional[str],
 ) -> Dict[str, Any]:
-    # extra safety: confirm user exists in THIS SAME DB before inserting
     cur.execute("select id from public.users where id = %s limit 1", (user_id,))
     existing_user = cur.fetchone()
     if not existing_user:
@@ -974,7 +981,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Creative Studio API",
-    version="2.0.0",
+    version="2.0.1",
     lifespan=lifespan,
 )
 
