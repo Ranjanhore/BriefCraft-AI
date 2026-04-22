@@ -2991,6 +2991,17 @@ Analysis: {project.get('analysis') or ''}
 
 def sync_create_visual_asset(project: Dict[str, Any], user_id: str, asset_type: str, title: str, prompt: str, section: Optional[str] = None, job_kind: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     policy = ensure_visual_policy(str(project["id"]), user_id)
+
+if asset_type == "moodboard":
+    policy = {
+        **policy,
+        "preview_size": "1280x720",
+        "master_size": "1920x1080",
+        "print_size": "1920x1080",
+        "preview_format": "jpg",
+        "master_format": "png",
+        "print_format": "png",
+    }
     asset = create_project_asset(
         str(project["id"]),
         user_id,
