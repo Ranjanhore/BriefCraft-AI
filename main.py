@@ -2649,6 +2649,41 @@ def normalize_visual_size(size: Optional[str], fallback: str) -> str:
         w = int(round(h * 16 / 9))
     return f"{w}x{h}"
 
+def normalize_visual_size(size: Optional[str], fallback: str) -> str:
+    raw = (size or fallback or "3840x2160").lower().strip()
+    w, h = parse_size(raw, parse_size(fallback, (3840, 2160)))
+    if h == 0:
+        return fallback
+    ratio = round(w / h, 4)
+    if abs(ratio - (16 / 9)) > 0.02:
+        w = int(round(h * 16 / 9))
+    if w > 3840 or h > 3840:
+        scale = min(3840 / max(w, 1), 3840 / max(h, 1))
+        w = max(512, int(w * scale))
+        h = max(512, int(h * scale))
+        w = int(round(h * 16 / 9))
+    return f"{w}x{h}"
+
+
+def choose_openai_image_size(policy: Dict[str, Any]) -> str:
+    target = normalize_visual_size(
+        str(policy.get("master_size") or VISUAL_MASTER_SIZE),
+        VISUAL_MASTER_SIZE,
+    )
+    w, h = parse_size(target, (3840, 2160))
+
+    if w == h:
+        return "1024x1024"
+    if w > h:
+        return "1536x1024"
+    return "1024x1536"
+
+
+def default_visual_policy() -> Dict[str, Any]:
+    preview = normalize_visual_size(VISUAL_PREVIEW_SIZE, "1920x1080")
+    master = normalize_visual_size(VISUAL_MASTER_SIZE, "3840x2160")
+    ...
+
 
 def default_visual_policy() -> Dict[str, Any]:
     preview = normalize_visual_size(VISUAL_PREVIEW_SIZE, "1920x1080")
