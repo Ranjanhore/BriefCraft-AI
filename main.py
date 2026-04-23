@@ -1,4 +1,3 @@
-import io
 import os
 import re
 import json
@@ -7,7 +6,6 @@ import socket
 import struct
 import base64
 import datetime as dt
-from math import ceil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from html import escape
@@ -255,6 +253,7 @@ def project_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 def voice_message_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return dict(row)
 
+
 # ------------------------------------------------------------------------------
 # DATABASE SETUP
 # ------------------------------------------------------------------------------
@@ -263,153 +262,14 @@ def create_tables() -> None:
         with conn.cursor() as cur:
             cur.execute("create extension if not exists pgcrypto;")
 
-              cur.execute("""
-                create table if not exists public.projects (
-                    id uuid primary key,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    name text not null default 'Untitled Project',
-                    event_type text,
-                    style_direction text,
-                    status text not null default 'draft',
-                    brief text,
-                    analysis text,
-                    concepts jsonb,
-                    selected jsonb,
-                    moodboard text,
-                    images jsonb,
-                    render3d jsonb,
-                    cad text,
-                    scene_json jsonb,
-                    deliverables jsonb,
-                    dimensions jsonb,
-                    brand_data jsonb,
-                    presentation_data jsonb,
-                    sound_data jsonb,
-                    lighting_data jsonb,
-                    showrunner_data jsonb,
-                    department_outputs jsonb,
-                    element_sheet jsonb,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            for stmt in [
-                "alter table public.projects add column if not exists style_direction text;",
-                "alter table public.projects add column if not exists brief text;",
-                "alter table public.projects add column if not exists analysis text;",
-                "alter table public.projects add column if not exists concepts jsonb;",
-                "alter table public.projects add column if not exists selected jsonb;",
-                "alter table public.projects add column if not exists sound_data jsonb;",
-                "alter table public.projects add column if not exists lighting_data jsonb;",
-                "alter table public.projects add column if not exists showrunner_data jsonb;",
-                "alter table public.projects add column if not exists department_outputs jsonb;",
-                "alter table public.projects add column if not exists element_sheet jsonb;",
-               ]:
-                cur.execute(stmt)
-
             cur.execute("""
-                create table if not exists public.project_versions (
+                create table if not exists public.users (
                     id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    version_no int not null,
-                    snapshot jsonb,
-                    note text,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_comments (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    section text,
-                    comment_text text,
-                    status text not null default 'open',
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.voice_sessions (
-                    id uuid primary key,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    project_id uuid references public.projects(id) on delete set null,
-                    title text not null default 'Voice Session',
-                    system_prompt text,
-                    voice text,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.voice_messages (
-                    id uuid primary key,
-                    session_id uuid not null references public.voice_sessions(id) on delete cascade,
-                    role text not null,
-                    content text,
-                    transcript text,
-                    audio_url text,
-                    meta jsonb,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_assets (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    asset_type text not null,
-                    section text,
-                    job_kind text,
-                    title text not null default 'Untitled Asset',
-                    prompt text,
-                    status text not null default 'queued',
-                    preview_url text,
-                    master_url text,
-                    print_url text,
-                    source_file_url text,
-                    meta jsonb,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.agent_jobs (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid not null references public.users(id) on delete cascade,
-                    agent_type text not null,
-                    job_type text not null,
-                    title text not null default 'Agent Job',
-                    status text not null default 'queued',
-                    priority int not null default 5,
-                    progress numeric(5,2) not null default 0,
-                    input_data jsonb,
-                    output_data jsonb,
-                    error_text text,
-                    parent_job_id uuid,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now(),
-                    started_at timestamptz,
-                    completed_at timestamptz
-                );
-            """)
-
-            cur.execute("""
-                create table if not exists public.project_activity_logs (
-                    id uuid primary key,
-                    project_id uuid not null references public.projects(id) on delete cascade,
-                    user_id uuid references public.users(id) on delete set null,
-                    activity_type text not null,
-                    title text not null,
-                    detail text,
-                    meta jsonb,
+                    email text unique not null,
+                    password text not null,
+                    full_name text,
+                    role text not null default 'user',
+                    is_active boolean not null default true,
                     created_at timestamptz not null default now()
                 );
             """)
@@ -439,6 +299,8 @@ def create_tables() -> None:
                     lighting_data jsonb,
                     showrunner_data jsonb,
                     department_outputs jsonb,
+                    visual_policy jsonb,
+                    orchestration_data jsonb,
                     element_sheet jsonb,
                     created_at timestamptz not null default now(),
                     updated_at timestamptz not null default now()
@@ -455,8 +317,9 @@ def create_tables() -> None:
                 "alter table public.projects add column if not exists lighting_data jsonb;",
                 "alter table public.projects add column if not exists showrunner_data jsonb;",
                 "alter table public.projects add column if not exists department_outputs jsonb;",
-                "alter table public.projects add column if not exists element_sheet jsonb;",
                 "alter table public.projects add column if not exists visual_policy jsonb;",
+                "alter table public.projects add column if not exists orchestration_data jsonb;",
+                "alter table public.projects add column if not exists element_sheet jsonb;",
                 "alter table public.projects add column if not exists orchestration_data jsonb;",
                 "alter table public.projects add column if not exists updated_at timestamptz not null default now();",
             ]:
@@ -568,11 +431,6 @@ def create_tables() -> None:
                 );
             """)
 
-            for stmt in [
-                "alter table public.projects add column if not exists element_sheet jsonb;",
-                ...
-            ]:
-                cur.execute(stmt)
 
 # ------------------------------------------------------------------------------
 # AUTH + USERS
@@ -707,30 +565,10 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
         return project
 
     allowed = {
-        "name",
-        "event_type",
-        "style_direction",
-        "status",
-        "brief",
-        "analysis",
-        "concepts",
-        "selected",
-        "moodboard",
-        "images",
-        "render3d",
-        "cad",
-        "scene_json",
-        "deliverables",
-        "dimensions",
-        "brand_data",
-        "presentation_data",
-        "sound_data",
-        "lighting_data",
-        "showrunner_data",
-        "department_outputs",
-        "visual_policy",
-        "orchestration_data",
-        "element_sheet",
+        "name", "event_type", "style_direction", "status", "brief", "analysis", "concepts", "selected",
+        "moodboard", "images", "render3d", "cad", "scene_json", "deliverables", "dimensions",
+        "brand_data", "presentation_data", "sound_data", "lighting_data", "showrunner_data",
+        "department_outputs", "visual_policy", "orchestration_data", "element_sheet",
     }
 
     clean = {k: v for k, v in values.items() if k in allowed}
@@ -755,6 +593,7 @@ def update_project_fields(cur, project_id: str, user_id: str, values: Dict[str, 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
 
 @with_db
 def snapshot_project_version(cur, project_id: str, user_id: str, note: str = "") -> None:
@@ -1211,7 +1050,7 @@ def _default_lighting_plan(project: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def generate_showrunner_department(project: Dict[str, Any]) -> Dict[str, Any]:
+def _default_showrunner_plan(project: Dict[str, Any]) -> Dict[str, Any]:
     project_name = project.get("name") or "Untitled Project"
     return {
         "running_order": [
@@ -1264,40 +1103,15 @@ def generate_showrunner_department(project: Dict[str, Any]) -> Dict[str, Any]:
             "Cue-to-cue",
             "Full dress run",
             "VIP walk-through"
-   "console_cues": [
-    {
-        "cue_no": 1,
-        "name": "Guest Open",
-        "cue_type": "show",
-        "standby": "Standby ambience and venue open",
-        "go": "Open venue ambience",
-        "actions": []
-    },
-    {
-        "cue_no": 2,
-        "name": "Opening",
-        "cue_type": "show",
-        "standby": "Standby opening cue",
-        "go": "Start opening cue",
-        "actions": []
-    },
-    {
-        "cue_no": 3,
-        "name": "Reveal",
-        "cue_type": "show",
-        "standby": "Standby synchronized reveal",
-        "go": "Execute synchronized reveal",
-        "actions": []
-    },
-    {
-        "cue_no": 4,
-        "name": "Speech",
-        "cue_type": "show",
-        "standby": "Standby speech state",
-        "go": "Set speech state",
-        "actions": []
-    },
-],
+        ],
+        "console_cues": [
+            {
+                "cue_no": 1,
+                "name": "Guest Open",
+                "standby": "Standby ambience and venue open",
+                "go": "Open venue ambience",
+                "actions": []
+            },
             {
                 "cue_no": 2,
                 "name": "Opening",
@@ -1375,10 +1189,10 @@ Project:
         if not isinstance(result, dict):
             raise ValueError("Invalid showrunner JSON")
         result.setdefault("pdf_sections", _default_showrunner_plan(project)["pdf_sections"])
-       if not result.get("console_cues"):
-    result["console_cues"] = _default_showrunner_plan(project)["console_cues"]
-for cue in result.get("console_cues", []):
-    cue.setdefault("actions", [])
+        if not result.get("console_cues"):
+            result["console_cues"] = _default_showrunner_plan(project)["console_cues"]
+        for cue in result.get("console_cues", []):
+            cue.setdefault("actions", [])
         return result
     except Exception:
         return _default_showrunner_plan(project)
@@ -1917,38 +1731,6 @@ class MoodboardGenerateInput(BaseModel):
     count: int = Field(default=3, ge=1, le=6)
     generate_now: bool = True
 
-class Scene3DGenerateInput(BaseModel):
-    venue_type: Optional[str] = None
-    use_uploaded_references: bool = True
-    include_cameras: bool = True
-
-
-class Render3DGenerateInput(BaseModel):
-    views: List[str] = Field(default_factory=lambda: ["hero", "top", "wide"])
-    generate_now: bool = False
-
-class ElementSheetGenerateInput(BaseModel):
-    include_sound: bool = True
-    include_lighting: bool = True
-    include_scenic: bool = True
-    include_power_summary: bool = True
-    include_xlsx: bool = True
-    sheet_title: Optional[str] = None
-
-class WorkerJobCompleteInput(BaseModel):
-    user_id: str
-    asset_id: str
-    preview_url: Optional[str] = None
-    master_url: Optional[str] = None
-    print_url: Optional[str] = None
-    meta: Optional[Dict[str, Any]] = None
-
-
-class WorkerJobFailInput(BaseModel):
-    user_id: str
-    asset_id: str
-    error_text: str
-
 
 class JobQueueInput(BaseModel):
     agent_type: str
@@ -1969,6 +1751,32 @@ class OrchestrateInput(BaseModel):
 class ReferenceUploadMeta(BaseModel):
     title: Optional[str] = None
     section: Optional[str] = None
+
+
+class ElementSheetGenerateInput(BaseModel):
+    include_sound: bool = True
+    include_lighting: bool = True
+    include_scenic: bool = True
+    include_power_summary: bool = True
+    include_xlsx: bool = True
+    sheet_title: Optional[str] = None
+
+
+class ShowTrialGenerateInput(BaseModel):
+    include_walkthrough: bool = True
+    include_audio_video: bool = True
+    include_camera_pan: bool = True
+    queue_render_jobs: bool = True
+    draft_name: Optional[str] = None
+
+
+class ShowTrialUpdateInput(BaseModel):
+    trial_data: Dict[str, Any]
+
+
+class ShowTrialFinalizeInput(BaseModel):
+    use_trial_cues: bool = True
+    mark_ready: bool = True
 
 
 # ------------------------------------------------------------------------------
@@ -2841,16 +2649,6 @@ def normalize_visual_size(size: Optional[str], fallback: str) -> str:
         w = int(round(h * 16 / 9))
     return f"{w}x{h}"
 
-def choose_openai_image_size(policy: Dict[str, Any]) -> str:
-    target = normalize_visual_size(str(policy.get("master_size") or VISUAL_MASTER_SIZE), VISUAL_MASTER_SIZE)
-    w, h = parse_size(target, (3840, 2160))
-
-    if w == h:
-        return "1024x1024"
-    if w > h:
-        return "1536x1024"
-    return "1024x1536"
-
 
 def default_visual_policy() -> Dict[str, Any]:
     preview = normalize_visual_size(VISUAL_PREVIEW_SIZE, "1920x1080")
@@ -3057,62 +2855,45 @@ def save_binary_image_versions(image_bytes: bytes, title: str, policy: Dict[str,
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{safe_filename(title)}_{uuid.uuid4().hex}"
     master_path = folder / f"{stem}_master.png"
+    master_path.write_bytes(image_bytes)
 
     preview_format = str(policy.get("preview_format") or "jpg").lower()
     preview_path = folder / f"{stem}_preview.{preview_format}"
-
     print_format = str(policy.get("print_format") or "png").lower()
     print_path = folder / f"{stem}_print.{print_format}"
 
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image
+        from PIL import ImageOps
 
-        source_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        master_img = Image.open(master_path).convert("RGB")
 
         pw, ph = parse_size(str(policy.get("preview_size") or "1920x1080"), (1920, 1080))
-        mw, mh = parse_size(str(policy.get("master_size") or "3840x2160"), (3840, 2160))
+        mw, mh = parse_size(str(policy.get("master_size") or "3840x2160"), master_img.size)
         tw, th = parse_size(str(policy.get("print_size") or "5760x3240"), (5760, 3240))
 
-        # Convert generated image into exact 16:9 master without distortion
-        master_img = ImageOps.fit(
-            source_img,
-            (mw, mh),
-            method=Image.LANCZOS,
-            centering=(0.5, 0.5),
-        )
-        master_img.save(master_path, format="PNG")
+        if master_img.size != (mw, mh):
+            master_img = master_img.resize((mw, mh), Image.LANCZOS)
+            master_img.save(master_path, format="PNG")
 
-        preview_img = ImageOps.fit(
-            master_img,
-            (pw, ph),
-            method=Image.LANCZOS,
-            centering=(0.5, 0.5),
-        )
+        preview_img = master_img.resize((pw, ph), Image.LANCZOS)
         if preview_format in {"jpg", "jpeg"}:
             preview_img.save(preview_path, format="JPEG", quality=92, optimize=True)
         else:
             preview_img.save(preview_path, format=preview_format.upper())
 
-        print_img = ImageOps.fit(
-            master_img,
-            (tw, th),
-            method=Image.LANCZOS,
-            centering=(0.5, 0.5),
-        )
+        print_img = master_img.resize((tw, th), Image.LANCZOS)
         if print_format in {"jpg", "jpeg"}:
             print_img.save(print_path, format="JPEG", quality=98, optimize=True)
         else:
             print_img.save(print_path, format=print_format.upper())
-
     except Exception:
-        master_path.write_bytes(image_bytes)
-        preview_path.write_bytes(image_bytes)
-        print_path.write_bytes(image_bytes)
+        preview_path.write_bytes(master_path.read_bytes())
+        print_path.write_bytes(master_path.read_bytes())
 
     preview_rel = relative_public_url(preview_path)
     master_rel = relative_public_url(master_path)
     print_rel = relative_public_url(print_path)
-
     return {
         "preview_url": absolute_public_url(preview_rel),
         "master_url": absolute_public_url(master_rel),
@@ -3122,42 +2903,27 @@ def save_binary_image_versions(image_bytes: bytes, title: str, policy: Dict[str,
         "print_path": print_rel,
     }
 
+
 def generate_image_asset_sync(prompt: str, title: str, policy: Dict[str, Any], reference_images: Optional[List[str]] = None) -> Dict[str, str]:
     api = get_openai_client()
     if api is None:
         raise HTTPException(status_code=500, detail="OpenAI not configured for image generation")
-
-    openai_size = choose_openai_image_size(policy)
-
-    final_prompt = (
-        f"{prompt}\n\n"
-        "Composition rules: cinematic widescreen composition, 16:9 presentation-safe framing, "
-        "keep key subjects centered with safe margins for later crop/mastering, "
-        "high-detail premium event visualization, no watermark, no text."
-    )
-
+    master_size = normalize_visual_size(str(policy.get("master_size") or VISUAL_MASTER_SIZE), VISUAL_MASTER_SIZE)
     try:
         result = api.images.generate(
             model=IMAGE_MODEL,
-            prompt=final_prompt,
-            size=openai_size,
+            prompt=prompt,
+            size=master_size,
             quality=policy.get("quality") or IMAGE_QUALITY or "high",
         )
-
         b64 = result.data[0].b64_json
         if not b64:
             raise ValueError("Image API returned no b64_json")
-
         image_bytes = base64.b64decode(b64)
-        return save_binary_image_versions(
-            image_bytes,
-            title=title,
-            policy=policy,
-            folder_name="visuals",
-        )
-
+        return save_binary_image_versions(image_bytes, title=title, policy=policy, folder_name="visuals")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Image generation failed: {exc}")
+
 
 def build_concept_visual_prompts(project: Dict[str, Any], concept: Dict[str, Any], count: int = 3) -> List[str]:
     count = max(1, min(count, 6))
@@ -3192,344 +2958,9 @@ Analysis: {project.get('analysis') or ''}
         f"Premium 16:9 printable close-up concept frame showing materiality, lighting mood, scenic edges, furniture, and brand detailing for {project.get('name') or 'event'}, concept {concept.get('name') or 'selected concept'}, photorealistic presentation quality, no text.",
     ][:count]
 
-def build_scene_3d_json(project: Dict[str, Any], venue_type: Optional[str] = None) -> Dict[str, Any]:
-    selected = load_json(project.get("selected")) or {}
-    return {
-        "project_id": str(project["id"]),
-        "concept_name": selected.get("name"),
-        "venue_type": venue_type or "generic indoor venue",
-        "units": "mm",
-        "stage": {
-            "width": 18000,
-            "depth": 9000,
-            "height": 1200
-        },
-        "screens": [
-            {"name": "main_led", "width": 12000, "height": 4500, "x": 0, "y": 0, "z": 2500}
-        ],
-        "scenic_elements": [
-            {"name": "hero_portal", "type": "arch", "x": 0, "y": 1200, "z": 0}
-        ],
-        "lighting_positions": [
-            {"name": "front_truss", "type": "truss", "x": 0, "y": -4000, "z": 7000}
-        ],
-        "cameras": [
-            {"view": "hero", "label": "Front Hero View"},
-            {"view": "top", "label": "Top View"},
-            {"view": "wide", "label": "Wide Venue View"},
-            {"view": "closeup", "label": "Close-up Detail View"}
-        ]
-    }
 
-def claim_next_render_job(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
-    jobs = list_agent_jobs(project_id, user_id)
-    queued = [
-        j for j in jobs
-        if j.get("agent_type") == "render_3d_agent" and j.get("status") == "queued"
-    ]
-    if not queued:
-        return None
-
-    queued.sort(key=lambda j: (j.get("priority", 5), j.get("created_at") or ""))
-    job = queued[0]
-
-    return update_agent_job(
-        job["id"],
-        user_id,
-        {
-            "status": "running",
-            "progress": 10,
-            "started_at": now_iso(),
-        },
-    )
-
-@app.post("/projects/{project_id}/scene-3d/generate")
-def generate_scene_3d(project_id: str, payload: Scene3DGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    scene = build_scene_3d_json(project, payload.venue_type)
-    project = update_project_fields(project_id, user_id, {"scene_json": scene})
-
-    add_project_activity(
-        project_id,
-        user_id,
-        "scene_3d.generated",
-        "3D Scene JSON",
-        detail="3D scene generated",
-        meta={"scene_keys": list(scene.keys())},
-    )
-
-    return {
-        "message": "3D scene generated",
-        "project_id": project_id,
-        "scene_json": scene,
-    }
-
-@app.post("/worker/projects/{project_id}/jobs/render-3d/next")
-def worker_claim_next_render_job(
-    project_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    job = claim_next_render_job(project_id, user_id)
-    if not job:
-        return {
-            "message": "No queued render jobs",
-            "project_id": project_id,
-            "job": None,
-        }
-
-    input_data = load_json(job.get("input_data")) or {}
-    asset_id = input_data.get("asset_id")
-    asset = get_project_asset_by_id(asset_id, user_id) if asset_id else None
-
-    if asset:
-        update_project_asset(
-            asset["id"],
-            user_id,
-            {
-                "status": "running",
-            },
-        )
-
-    add_project_activity(
-        project_id,
-        user_id,
-        "job.running",
-        job.get("title") or "3D Render Job",
-        detail="3D render job claimed by worker",
-        meta={"job_id": job["id"], "asset_id": asset_id},
-    )
-
-    return {
-        "message": "Render job claimed",
-        "project_id": project_id,
-        "job": job,
-        "asset": asset,
-    }
-
-
-@app.post("/worker/jobs/{job_id}/complete")
-def worker_complete_job(
-    job_id: str,
-    payload: WorkerJobCompleteInput,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-):
-    operator_user_id = str(current_user["id"])
-    job = update_agent_job(
-        job_id,
-        payload.user_id,
-        {
-            "status": "completed",
-            "progress": 100,
-            "completed_at": now_iso(),
-            "output_data": {
-                "preview_url": payload.preview_url,
-                "master_url": payload.master_url,
-                "print_url": payload.print_url,
-                "meta": payload.meta or {},
-                "completed_by": operator_user_id,
-            },
-        },
-    )
-
-    asset = update_project_asset(
-        payload.asset_id,
-        payload.user_id,
-        {
-            "status": "completed",
-            "preview_url": payload.preview_url,
-            "master_url": payload.master_url,
-            "print_url": payload.print_url,
-            "meta": {
-                "worker_output": payload.meta or {},
-                "completed_by": operator_user_id,
-            },
-        },
-    )
-
-    add_project_activity(
-        asset["project_id"],
-        payload.user_id,
-        "job.completed",
-        asset.get("title") or job.get("title") or "Worker Job",
-        detail="Worker marked render job completed",
-        meta={"job_id": job_id, "asset_id": payload.asset_id},
-    )
-
-    return {
-        "message": "Job completed",
-        "job": job,
-        "asset": asset,
-    }
-
-
-@app.post("/worker/jobs/{job_id}/fail")
-def worker_fail_job(
-    job_id: str,
-    payload: WorkerJobFailInput,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-):
-    operator_user_id = str(current_user["id"])
-    job = update_agent_job(
-        job_id,
-        payload.user_id,
-        {
-            "status": "failed",
-            "progress": 0,
-            "completed_at": now_iso(),
-            "error_text": payload.error_text,
-            "output_data": {
-                "failed_by": operator_user_id,
-            },
-        },
-    )
-
-    asset = update_project_asset(
-        payload.asset_id,
-        payload.user_id,
-        {
-            "status": "failed",
-            "meta": {
-                "error_text": payload.error_text,
-                "failed_by": operator_user_id,
-            },
-        },
-    )
-
-    add_project_activity(
-        asset["project_id"],
-        payload.user_id,
-        "job.failed",
-        asset.get("title") or job.get("title") or "Worker Job",
-        detail=payload.error_text,
-        meta={"job_id": job_id, "asset_id": payload.asset_id},
-    )
-
-    return {
-        "message": "Job failed",
-        "job": job,
-        "asset": asset,
-    }
-
-
-@app.post("/projects/{project_id}/renders-3d/generate")
-def generate_renders_3d(project_id: str, payload: Render3DGenerateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not project.get("scene_json"):
-        raise HTTPException(status_code=400, detail="Generate scene_json first")
-
-    assets = []
-    jobs = []
-
-    for view in payload.views:
-        title = f"{view.title()} Render"
-        prompt = f"Photorealistic 3D render for {project.get('name')}, camera view: {view}"
-
-        asset = create_project_asset(
-            project_id,
-            user_id,
-            asset_type="3d_render",
-            title=title,
-            prompt=prompt,
-            section="renders_3d",
-            job_kind=view,
-            status="queued",
-            meta={"view": view},
-        )
-        assets.append(asset)
-
-        job = queue_agent_job_with_activity(
-            project_id,
-            user_id,
-            "render_3d_agent",
-            view,
-            title,
-            input_data={
-                "asset_id": asset["id"],
-                "scene_json": project.get("scene_json"),
-                "view": view,
-            },
-        )
-        jobs.append(job)
-
-    return {
-        "message": "3D render jobs queued",
-        "assets": assets,
-        "jobs": jobs,
-    }
-
-
-@app.get("/projects/{project_id}/renders-3d")
-def list_renders_3d(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    assets = list_project_assets(project_id, user_id)
-    filtered = [a for a in assets if a.get("asset_type") in {"3d_render", "scene_preview"}]
-
-    return {
-        "project_id": project_id,
-        "assets": filtered,
-    }
-
-
-@app.get("/projects/{project_id}/renders-3d/status")
-def render_3d_status(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    assets = list_project_assets(project_id, user_id)
-    jobs = list_agent_jobs(project_id, user_id)
-
-    render_assets = [a for a in assets if a.get("asset_type") == "3d_render"]
-    render_jobs = [j for j in jobs if j.get("agent_type") == "render_3d_agent"]
-    return {
-        "project_id": project_id,
-        "scene_json_ready": bool(project.get("scene_json")),
-        "assets": render_assets,
-        "jobs": render_jobs,
-    }
-
-
-def sync_create_visual_asset(
-    project: Dict[str, Any],
-    user_id: str,
-    asset_type: str,
-    title: str,
-    prompt: str,
-    section: Optional[str] = None,
-    job_kind: Optional[str] = None,
-    source_file_url: Optional[str] = None,
-    meta: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+def sync_create_visual_asset(project: Dict[str, Any], user_id: str, asset_type: str, title: str, prompt: str, section: Optional[str] = None, job_kind: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     policy = ensure_visual_policy(str(project["id"]), user_id)
-
-    if asset_type == "moodboard":
-        policy = {
-            **policy,
-            "preview_size": "1280x720",
-            "master_size": "1920x1080",
-            "print_size": "1920x1080",
-            "preview_format": "jpg",
-            "master_format": "png",
-            "print_format": "png",
-        }
-
     asset = create_project_asset(
         str(project["id"]),
         user_id,
@@ -3542,13 +2973,7 @@ def sync_create_visual_asset(
         status="running",
         meta={**(meta or {}), "visual_policy": policy},
     )
-
-    generated = generate_image_asset_sync(
-        prompt=prompt,
-        title=title,
-        policy=policy,
-    )
-
+    generated = generate_image_asset_sync(prompt=prompt, title=title, policy=policy)
     asset = update_project_asset(
         asset["id"],
         user_id,
@@ -3557,24 +2982,12 @@ def sync_create_visual_asset(
             "preview_url": generated["preview_url"],
             "master_url": generated["master_url"],
             "print_url": generated["print_url"],
-            "meta": {
-                **(meta or {}),
-                "visual_policy": policy,
-                "storage": generated,
-            },
+            "meta": {**(meta or {}), "visual_policy": policy, "storage": generated},
         },
     )
-
-    add_project_activity(
-        str(project["id"]),
-        user_id,
-        "asset.completed",
-        title,
-        detail=f"{asset_type} generated",
-        meta={"asset_id": asset["id"], "section": section},
-    )
-
+    add_project_activity(str(project["id"]), user_id, "asset.completed", title, detail=f"{asset_type} generated", meta={"asset_id": asset["id"], "section": section})
     return asset
+
 
 def queue_agent_job_with_activity(project_id: str, user_id: str, agent_type: str, job_type: str, title: str, priority: int = 5, input_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     job = create_agent_job(project_id, user_id, agent_type=agent_type, job_type=job_type, title=title, priority=priority, input_data=input_data or {})
@@ -3872,6 +3285,593 @@ def show_console_history(project_id: str, current_user: Dict[str, Any] = Depends
     state = get_console_state(project)
     return {"execution_log": state.get("execution_log") or []}
 
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _power_row(
+    element_type: str,
+    name: str,
+    qty: float,
+    unit: str,
+    width_mm: float = 0.0,
+    height_mm: float = 0.0,
+    depth_mm: float = 0.0,
+    watts_each: float = 0.0,
+    notes: str = "",
+) -> Dict[str, Any]:
+    total_watts = round(qty * watts_each, 2)
+    total_kw = round(total_watts / 1000.0, 3)
+    amps_230v = round(total_watts / 230.0, 2) if total_watts > 0 else 0.0
+    return {
+        "element_type": element_type,
+        "name": name,
+        "qty": qty,
+        "unit": unit,
+        "width_mm": round(width_mm, 2),
+        "height_mm": round(height_mm, 2),
+        "depth_mm": round(depth_mm, 2),
+        "watts_each": round(watts_each, 2),
+        "total_watts": total_watts,
+        "total_kw": total_kw,
+        "amps_230v": amps_230v,
+        "wiring_points": max(1, int(qty)) if total_watts > 0 else 0,
+        "notes": notes,
+    }
+
+
+def generate_element_sheet(
+    project: Dict[str, Any],
+    include_sound: bool = True,
+    include_lighting: bool = True,
+    include_scenic: bool = True,
+    include_power_summary: bool = True,
+) -> Dict[str, Any]:
+    scene = load_json(project.get("scene_json")) or {}
+    lighting = load_json(project.get("lighting_data")) or {}
+    sound = load_json(project.get("sound_data")) or {}
+    selected = load_json(project.get("selected")) or {}
+
+    rows: List[Dict[str, Any]] = []
+
+    if include_scenic:
+        stage = scene.get("stage") or {}
+        rows.append(
+            _power_row(
+                element_type="scenic",
+                name="Main Stage Deck",
+                qty=1,
+                unit="set",
+                width_mm=_to_float(stage.get("width"), 18000),
+                depth_mm=_to_float(stage.get("depth"), 9000),
+                height_mm=_to_float(stage.get("height"), 1200),
+                watts_each=0,
+                notes="Primary performance stage from scene_json.",
+            )
+        )
+
+        for screen in scene.get("screens") or []:
+            width = _to_float(screen.get("width"), 0)
+            height = _to_float(screen.get("height"), 0)
+            sqm = (width / 1000.0) * (height / 1000.0)
+            watts_each = round(sqm * 650.0, 2)
+            rows.append(
+                _power_row(
+                    element_type="led",
+                    name=str(screen.get("name") or "LED Screen"),
+                    qty=1,
+                    unit="pc",
+                    width_mm=width,
+                    height_mm=height,
+                    depth_mm=_to_float(screen.get("depth"), 0),
+                    watts_each=watts_each,
+                    notes=f"Estimated from {round(sqm, 2)} sqm LED area at 650 W/sqm average load.",
+                )
+            )
+
+        for scenic in scene.get("scenic_elements") or []:
+            rows.append(
+                _power_row(
+                    element_type="scenic",
+                    name=str(scenic.get("name") or scenic.get("type") or "Scenic Element"),
+                    qty=1,
+                    unit="pc",
+                    width_mm=_to_float(scenic.get("width"), 0),
+                    height_mm=_to_float(scenic.get("height"), 0),
+                    depth_mm=_to_float(scenic.get("depth"), 0),
+                    watts_each=_to_float(scenic.get("watts"), 0),
+                    notes="Scenic element from scene_json.",
+                )
+            )
+
+    if include_lighting:
+        fixture_list = lighting.get("fixture_list") or []
+        default_watt_map = {
+            "moving heads (spot/profile)": 550,
+            "wash fixtures": 350,
+            "led battens / linears": 120,
+            "audience blinders": 650,
+            "pinspots / specials": 75,
+        }
+        for item in fixture_list:
+            label = str(item).strip()
+            key = label.lower()
+            qty = 4 if "moving" in key else 8 if "wash" in key else 12 if "battens" in key or "linears" in key else 6 if "blinder" in key else 8
+            watts = default_watt_map.get(key, 150)
+            rows.append(
+                _power_row(
+                    element_type="lighting",
+                    name=label,
+                    qty=qty,
+                    unit="pc",
+                    watts_each=watts,
+                    notes="Estimated quantity/load for concept-stage planning.",
+                )
+            )
+
+    if include_sound:
+        inputs = sound.get("input_list") or []
+        rows.append(
+            _power_row(
+                element_type="audio",
+                name="FOH Console",
+                qty=1,
+                unit="pc",
+                watts_each=350,
+                notes=str((sound.get("system_design") or {}).get("console") or "FOH mixing console"),
+            )
+        )
+        rows.append(
+            _power_row(
+                element_type="audio",
+                name="Playback Rack / Show Laptop",
+                qty=1,
+                unit="pc",
+                watts_each=250,
+                notes="Primary playback and show control audio.",
+            )
+        )
+        if inputs:
+            rows.append(
+                _power_row(
+                    element_type="audio",
+                    name="Wireless Mic / RF Package",
+                    qty=max(2, len(inputs)),
+                    unit="ch",
+                    watts_each=25,
+                    notes="Estimated power for receivers, antenna distro, and charging.",
+                )
+            )
+
+    total_watts = round(sum(_to_float(r.get("total_watts")) for r in rows), 2)
+    total_kw = round(total_watts / 1000.0, 3)
+    amps_230v = round(total_watts / 230.0, 2) if total_watts > 0 else 0.0
+    recommended_with_headroom_kw = round(total_kw * 1.25, 3)
+
+    summary = {
+        "project_id": str(project.get("id")),
+        "project_name": project.get("name") or "Untitled Project",
+        "concept_name": selected.get("name"),
+        "generated_at": now_iso(),
+        "rows": rows,
+        "totals": {
+            "element_count": len(rows),
+            "total_watts": total_watts,
+            "total_kw": total_kw,
+            "amps_230v": amps_230v,
+            "recommended_with_25pct_headroom_kw": recommended_with_headroom_kw,
+        },
+        "notes": [
+            "All power figures are planning estimates and must be validated by production vendors.",
+            "LED screen load is estimated from visible area and average LED wall consumption.",
+            "Fixture quantities for lighting are preliminary planning allowances unless exact counts exist in design data.",
+        ],
+    }
+
+    if include_power_summary:
+        summary["power_summary"] = {
+            "connected_load_kw": total_kw,
+            "recommended_generator_or_mains_kw": recommended_with_headroom_kw,
+            "single_phase_230v_amps": amps_230v,
+            "recommended_wiring_points": sum(int(_to_float(r.get("wiring_points"))) for r in rows),
+        }
+
+    return summary
+
+
+def export_element_sheet_xlsx(element_sheet: Dict[str, Any], filename_prefix: str = "element_sheet") -> Dict[str, str]:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"XLSX dependency missing: {exc}")
+
+    out_dir = MEDIA_DIR / "spreadsheets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{filename_prefix}_{uuid.uuid4().hex}.xlsx"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Element Sheet"
+
+    headers = [
+        "element_type", "name", "qty", "unit", "width_mm", "height_mm", "depth_mm",
+        "watts_each", "total_watts", "total_kw", "amps_230v", "wiring_points", "notes",
+    ]
+    ws.append(headers)
+
+    header_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row in element_sheet.get("rows") or []:
+        ws.append([row.get(h) for h in headers])
+
+    widths = {
+        "A": 16, "B": 34, "C": 8, "D": 10, "E": 12, "F": 12, "G": 12,
+        "H": 12, "I": 14, "J": 12, "K": 12, "L": 14, "M": 48,
+    }
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    totals_ws = wb.create_sheet("Totals")
+    totals_ws.append(["metric", "value"])
+    for cell in totals_ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    totals = element_sheet.get("totals") or {}
+    power_summary = element_sheet.get("power_summary") or {}
+    for key, value in totals.items():
+        totals_ws.append([key, value])
+
+    if power_summary:
+        totals_ws.append([])
+        totals_ws.append(["power_metric", "value"])
+        for cell in totals_ws[totals_ws.max_row]:
+            cell.fill = header_fill
+            cell.font = header_font
+        for key, value in power_summary.items():
+            totals_ws.append([key, value])
+
+    meta_ws = wb.create_sheet("Project Meta")
+    meta_ws.append(["field", "value"])
+    for cell in meta_ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+    meta_ws.append(["project_id", element_sheet.get("project_id")])
+    meta_ws.append(["project_name", element_sheet.get("project_name")])
+    meta_ws.append(["concept_name", element_sheet.get("concept_name")])
+    meta_ws.append(["generated_at", element_sheet.get("generated_at")])
+
+    wb.save(out_path)
+    rel = relative_public_url(out_path)
+    return {"xlsx_path": rel, "xlsx_url": absolute_public_url(rel)}
+
+
+def build_walkthrough_timeline(project: Dict[str, Any], scene: Dict[str, Any], showrunner: Dict[str, Any], include_camera_pan: bool = True) -> List[Dict[str, Any]]:
+    cameras = scene.get("cameras") or []
+    cues = showrunner.get("console_cues") or []
+    timeline: List[Dict[str, Any]] = []
+
+    base_views = cameras[:] or [
+        {"view": "hero", "label": "Front Hero View"},
+        {"view": "wide", "label": "Wide Venue View"},
+        {"view": "top", "label": "Top View"},
+    ]
+
+    cue_durations = [12, 14, 16, 18, 14, 12]
+    t = 0
+    for idx, cue in enumerate(cues or [{"cue_no": 1, "name": "Overview"}]):
+        cam = base_views[idx % len(base_views)]
+        duration = cue_durations[idx % len(cue_durations)]
+        segment = {
+            "segment_no": idx + 1,
+            "cue_no": cue.get("cue_no", idx + 1),
+            "cue_name": cue.get("name", f"Cue {idx + 1}"),
+            "start_sec": t,
+            "duration_sec": duration,
+            "camera": {
+                "view": cam.get("view", "hero"),
+                "label": cam.get("label", "Camera"),
+                "motion": "pan_orbit" if include_camera_pan else "static",
+            },
+            "audio_mode": "demo_mix",
+            "video_mode": "screen_preview",
+            "notes": cue.get("go") or cue.get("standby") or "",
+        }
+        if include_camera_pan:
+            segment["camera"]["path"] = [
+                {"x": -6.0, "y": 1.8, "z": 18.0},
+                {"x": 0.0, "y": 2.2, "z": 14.0},
+                {"x": 6.0, "y": 1.8, "z": 18.0},
+            ]
+        timeline.append(segment)
+        t += duration
+
+    return timeline
+
+
+def build_show_trial_package(
+    project: Dict[str, Any],
+    include_walkthrough: bool = True,
+    include_audio_video: bool = True,
+    include_camera_pan: bool = True,
+) -> Dict[str, Any]:
+    scene = load_json(project.get("scene_json")) or build_scene_3d_json(project)
+    sound = load_json(project.get("sound_data")) or _default_sound_plan(project)
+    lighting = load_json(project.get("lighting_data")) or _default_lighting_plan(project)
+    showrunner = load_json(project.get("showrunner_data")) or _default_showrunner_plan(project)
+    selected = load_json(project.get("selected")) or {}
+
+    cues = showrunner.get("console_cues") or _default_showrunner_plan(project)["console_cues"]
+    timeline = build_walkthrough_timeline(project, scene, showrunner, include_camera_pan=include_camera_pan) if include_walkthrough else []
+
+    cue_sheet = []
+    elapsed = 0
+    for idx, cue in enumerate(cues, start=1):
+        duration = 15 if idx == 1 else 18
+        cue_sheet.append({
+            "cue_no": cue.get("cue_no", idx),
+            "name": cue.get("name", f"Cue {idx}"),
+            "standby": cue.get("standby", ""),
+            "go": cue.get("go", ""),
+            "cue_type": cue.get("cue_type", "show"),
+            "actions": cue.get("actions", []),
+            "est_start_sec": elapsed,
+            "est_duration_sec": duration,
+        })
+        elapsed += duration
+
+    package = {
+        "project_id": str(project.get("id")),
+        "project_name": project.get("name") or "Untitled Project",
+        "concept_name": selected.get("name"),
+        "generated_at": now_iso(),
+        "mode": "trial",
+        "walkthrough_enabled": include_walkthrough,
+        "audio_video_enabled": include_audio_video,
+        "camera_pan_enabled": include_camera_pan,
+        "scene_overview": {
+            "venue_type": scene.get("venue_type"),
+            "stage": scene.get("stage"),
+            "screen_count": len(scene.get("screens") or []),
+            "camera_count": len(scene.get("cameras") or []),
+        },
+        "walkthrough_timeline": timeline,
+        "cue_sheet": cue_sheet,
+        "trial_script": [
+            f"Welcome to the pre-show trial for {project.get('name') or 'your event'}.",
+            "This simulation walks the client through venue mood, screen content, cue rhythm, and reveal timing.",
+            "Use edit mode to change cue text, pacing, actions, or camera timing before final show lock.",
+        ],
+        "audio_preview": {
+            "enabled": include_audio_video,
+            "playback_cues": sound.get("playback_cues") or [],
+        },
+        "video_preview": {
+            "enabled": include_audio_video,
+            "screens": scene.get("screens") or [],
+        },
+        "lighting_preview": {
+            "scene_cues": lighting.get("scene_cues") or [],
+        },
+        "edit_options": [
+            "Edit cue copy",
+            "Edit timing",
+            "Edit actions",
+            "Edit camera path",
+            "Finalize for live show run",
+        ],
+        "final_show_ready": False,
+    }
+    return package
+
+
+@app.post("/projects/{project_id}/element-sheet/generate")
+def generate_element_sheet_endpoint(
+    project_id: str,
+    payload: ElementSheetGenerateInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    element_sheet = generate_element_sheet(
+        project,
+        include_sound=payload.include_sound,
+        include_lighting=payload.include_lighting,
+        include_scenic=payload.include_scenic,
+        include_power_summary=payload.include_power_summary,
+    )
+
+    xlsx = {}
+    if payload.include_xlsx:
+        xlsx = export_element_sheet_xlsx(
+            element_sheet,
+            filename_prefix=safe_filename(payload.sheet_title or f"{project.get('name') or 'project'}_element_sheet"),
+        )
+        element_sheet["xlsx_url"] = xlsx["xlsx_url"]
+        element_sheet["xlsx_path"] = xlsx["xlsx_path"]
+
+    updated_project = update_project_fields(project_id, user_id, {"element_sheet": element_sheet})
+    add_project_activity(
+        project_id,
+        user_id,
+        "element_sheet.generated",
+        payload.sheet_title or "Element sheet generated",
+        detail="Element sizing, wiring points, and power load summary generated.",
+        meta={"xlsx_url": xlsx.get("xlsx_url"), "row_count": len(element_sheet.get("rows") or [])},
+    )
+
+    return {
+        "message": "Element sheet generated",
+        "project_id": project_id,
+        "element_sheet": element_sheet,
+        "project": updated_project,
+        **xlsx,
+    }
+
+
+@app.get("/projects/{project_id}/element-sheet")
+def get_element_sheet_endpoint(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"project_id": project_id, "element_sheet": load_json(project.get("element_sheet"))}
+
+
+@app.post("/projects/{project_id}/show-trial/generate")
+def generate_show_trial_endpoint(
+    project_id: str,
+    payload: ShowTrialGenerateInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.get("scene_json"):
+        project = update_project_fields(project_id, user_id, {"scene_json": build_scene_3d_json(project)})
+    if not project.get("showrunner_data"):
+        project = update_project_fields(project_id, user_id, {"showrunner_data": generate_showrunner_department(project)})
+    if not project.get("sound_data"):
+        project = update_project_fields(project_id, user_id, {"sound_data": generate_sound_department(project)})
+    if not project.get("lighting_data"):
+        project = update_project_fields(project_id, user_id, {"lighting_data": generate_lighting_department(project)})
+
+    project = get_project_by_id(project_id, user_id=user_id) or project
+    trial = build_show_trial_package(
+        project,
+        include_walkthrough=payload.include_walkthrough,
+        include_audio_video=payload.include_audio_video,
+        include_camera_pan=payload.include_camera_pan,
+    )
+    trial["draft_name"] = payload.draft_name or f"{project.get('name') or 'Project'} Trial"
+
+    orchestration = load_json(project.get("orchestration_data")) or {}
+    orchestration["show_trial"] = trial
+    project = update_project_fields(project_id, user_id, {"orchestration_data": orchestration})
+
+    queued_jobs = []
+    if payload.queue_render_jobs:
+        walkthrough_asset = create_project_asset(
+            project_id, user_id, "walkthrough_preview", trial["draft_name"] + " Walkthrough",
+            prompt="3D walkthrough preview with camera pan, AV preview and cue-driven simulation",
+            section="show_trial", job_kind="walkthrough_trial", status="queued", meta={"trial": True},
+        )
+        av_asset = create_project_asset(
+            project_id, user_id, "show_trial_preview", trial["draft_name"] + " Live Trial",
+            prompt="Live show trial preview with cue sheet, show running script, AV sync and console timing",
+            section="show_trial", job_kind="live_show_trial", status="queued", meta={"trial": True},
+        )
+        queued_jobs.append(queue_agent_job_with_activity(project_id, user_id, "walkthrough_agent", "walkthrough_trial", walkthrough_asset["title"], input_data={"asset_id": walkthrough_asset["id"], "trial": trial}))
+        queued_jobs.append(queue_agent_job_with_activity(project_id, user_id, "show_trial_agent", "live_show_trial", av_asset["title"], input_data={"asset_id": av_asset["id"], "trial": trial}))
+
+    add_project_activity(
+        project_id, user_id, "show_trial.generated", trial["draft_name"],
+        detail="3D walkthrough + live show trial prepared for pre-show review.",
+        meta={"queued_jobs": [j.get("id") for j in queued_jobs]},
+    )
+
+    return {
+        "message": "Show trial generated",
+        "project_id": project_id,
+        "show_trial": trial,
+        "jobs": queued_jobs,
+        "project": project,
+    }
+
+
+@app.get("/projects/{project_id}/show-trial")
+def get_show_trial_endpoint(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    project = get_project_by_id(project_id, user_id=str(current_user["id"]))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    orchestration = load_json(project.get("orchestration_data")) or {}
+    return {"project_id": project_id, "show_trial": orchestration.get("show_trial")}
+
+
+@app.post("/projects/{project_id}/show-trial/update")
+def update_show_trial_endpoint(
+    project_id: str,
+    payload: ShowTrialUpdateInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    orchestration = load_json(project.get("orchestration_data")) or {}
+    existing = orchestration.get("show_trial") or {}
+    updated_trial = {**existing, **(payload.trial_data or {})}
+    orchestration["show_trial"] = updated_trial
+    project = update_project_fields(project_id, user_id, {"orchestration_data": orchestration})
+
+    add_project_activity(project_id, user_id, "show_trial.updated", updated_trial.get("draft_name") or "Show trial updated")
+    return {"message": "Show trial updated", "show_trial": updated_trial, "project": project}
+
+
+@app.post("/projects/{project_id}/show-trial/finalize")
+def finalize_show_trial_endpoint(
+    project_id: str,
+    payload: ShowTrialFinalizeInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    orchestration = load_json(project.get("orchestration_data")) or {}
+    trial = orchestration.get("show_trial")
+    if not trial:
+        raise HTTPException(status_code=404, detail="Show trial not found")
+
+    showrunner = load_json(project.get("showrunner_data")) or _default_showrunner_plan(project)
+    if payload.use_trial_cues and trial.get("cue_sheet"):
+        showrunner["console_cues"] = [
+            {
+                "cue_no": cue.get("cue_no", idx + 1),
+                "name": cue.get("name", f"Cue {idx + 1}"),
+                "cue_type": cue.get("cue_type", "show"),
+                "standby": cue.get("standby", ""),
+                "go": cue.get("go", ""),
+                "actions": cue.get("actions", []),
+            }
+            for idx, cue in enumerate(trial.get("cue_sheet") or [])
+        ]
+
+    trial["final_show_ready"] = True
+    trial["finalized_at"] = now_iso()
+    orchestration["show_trial"] = trial
+
+    updates = {"showrunner_data": showrunner, "orchestration_data": orchestration}
+    if payload.mark_ready:
+        updates["status"] = "show_ready"
+
+    project = update_project_fields(project_id, user_id, updates)
+
+    add_project_activity(
+        project_id, user_id, "show_trial.finalized", trial.get("draft_name") or "Show trial finalized",
+        detail="Trial cues promoted to final show running option.",
+    )
+    return {"message": "Show trial finalized", "show_trial": trial, "project": project}
 
 
 if __name__ == "__main__":
