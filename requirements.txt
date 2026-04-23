@@ -12,3 +12,8 @@ python-multipart
 Pillow
 mido
 python-rtmidi
+openpyxl
+reportlab
+Pillow
+mido
+python-rtmidi
