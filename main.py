@@ -45,7 +45,30 @@ ALLOWED_ORIGINS = _split_origins(
 
 app.add_middleware(
     CORSMiddleware,
+    from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+
+app = FastAPI()
+
+def _split_origins(value: str) -> list[str]:
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+ALLOWED_ORIGINS = _split_origins(
+    os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,https://briefly-sparkle.lovable.app",
+    )
+)
+
+app.add_middleware(
+    CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?lovable\.(app|dev)$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
     allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?lovable\.(app|dev)$",
     allow_credentials=True,
     allow_methods=["*"],
