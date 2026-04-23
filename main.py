@@ -1226,7 +1226,7 @@ def _default_lighting_plan(project: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _default_showrunner_plan(project: Dict[str, Any]) -> Dict[str, Any]:
+def generate_showrunner_department(project: Dict[str, Any]) -> Dict[str, Any]:
     project_name = project.get("name") or "Untitled Project"
     return {
         "running_order": [
@@ -1280,14 +1280,16 @@ def _default_showrunner_plan(project: Dict[str, Any]) -> Dict[str, Any]:
             "Full dress run",
             "VIP walk-through"
         ],
-        "console_cues": [
-            {
-                "cue_no": 1,
-                "name": "Guest Open",
-                "standby": "Standby ambience and venue open",
-                "go": "Open venue ambience",
-                "actions": []
-            },
+      "console_cues": [
+    {
+        "cue_no": 1,
+        "name": "Guest Open",
+        "standby": "Standby ambience and venue open",
+        "go": "Open venue ambience",
+        "actions": []
+    },
+    ...
+],
             {
                 "cue_no": 2,
                 "name": "Opening",
@@ -1365,10 +1367,10 @@ Project:
         if not isinstance(result, dict):
             raise ValueError("Invalid showrunner JSON")
         result.setdefault("pdf_sections", _default_showrunner_plan(project)["pdf_sections"])
-        if not result.get("console_cues"):
-            result["console_cues"] = _default_showrunner_plan(project)["console_cues"]
-        for cue in result.get("console_cues", []):
-            cue.setdefault("actions", [])
+       if not result.get("console_cues"):
+    result["console_cues"] = _default_showrunner_plan(project)["console_cues"]
+for cue in result.get("console_cues", []):
+    cue.setdefault("actions", [])
         return result
     except Exception:
         return _default_showrunner_plan(project)
