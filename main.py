@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import uuid
@@ -27,7 +26,32 @@ from fastapi import (
     Form,
     Query,
 )
+import os
 from fastapi.middleware.cors import CORSMiddleware
+
+def _split_origins(value: str) -> list[str]:
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+ALLOWED_ORIGINS = _split_origins(
+    os.getenv(
+        "ALLOWED_ORIGINS",
+        ",".join([
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://briefly-sparkle.lovable.app",
+        ]),
+    )
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?lovable\.(app|dev)$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
