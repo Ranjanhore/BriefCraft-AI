@@ -263,19 +263,7 @@ def create_tables() -> None:
         with conn.cursor() as cur:
             cur.execute("create extension if not exists pgcrypto;")
 
-            cur.execute("""
-                create table if not exists public.users (
-                    id uuid primary key,
-                    email text unique not null,
-                    password text not null,
-                    full_name text,
-                    role text not null default 'user',
-                    is_active boolean not null default true,
-                    created_at timestamptz not null default now()
-                );
-            """)
-
-            cur.execute("""
+              cur.execute("""
                 create table if not exists public.projects (
                     id uuid primary key,
                     user_id uuid not null references public.users(id) on delete cascade,
@@ -317,10 +305,7 @@ def create_tables() -> None:
                 "alter table public.projects add column if not exists showrunner_data jsonb;",
                 "alter table public.projects add column if not exists department_outputs jsonb;",
                 "alter table public.projects add column if not exists element_sheet jsonb;",
-                "alter table public.projects add column if not exists visual_policy jsonb;",
-                "alter table public.projects add column if not exists orchestration_data jsonb;",
-                "alter table public.projects add column if not exists updated_at timestamptz not null default now();",
-            ]:
+               ]:
                 cur.execute(stmt)
 
             cur.execute("""
@@ -1279,16 +1264,39 @@ def generate_showrunner_department(project: Dict[str, Any]) -> Dict[str, Any]:
             "Cue-to-cue",
             "Full dress run",
             "VIP walk-through"
-        ],
-      "console_cues": [
+   "console_cues": [
     {
         "cue_no": 1,
         "name": "Guest Open",
+        "cue_type": "show",
         "standby": "Standby ambience and venue open",
         "go": "Open venue ambience",
         "actions": []
     },
-    ...
+    {
+        "cue_no": 2,
+        "name": "Opening",
+        "cue_type": "show",
+        "standby": "Standby opening cue",
+        "go": "Start opening cue",
+        "actions": []
+    },
+    {
+        "cue_no": 3,
+        "name": "Reveal",
+        "cue_type": "show",
+        "standby": "Standby synchronized reveal",
+        "go": "Execute synchronized reveal",
+        "actions": []
+    },
+    {
+        "cue_no": 4,
+        "name": "Speech",
+        "cue_type": "show",
+        "standby": "Standby speech state",
+        "go": "Set speech state",
+        "actions": []
+    },
 ],
             {
                 "cue_no": 2,
@@ -3489,8 +3497,7 @@ def render_3d_status(project_id: str, current_user: Dict[str, Any] = Depends(get
     jobs = list_agent_jobs(project_id, user_id)
 
     render_assets = [a for a in assets if a.get("asset_type") == "3d_render"]
-    render_jobs = [j for j in jobs if j.get("agent_name") == "render_3d_agent"]
-
+    render_jobs = [j for j in jobs if j.get("agent_type") == "render_3d_agent"]
     return {
         "project_id": project_id,
         "scene_json_ready": bool(project.get("scene_json")),
