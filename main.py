@@ -837,7 +837,8 @@ def get_voice_messages(session_id: str, user_id: str, limit: int = 30) -> List[D
 # ---------------------------------------------------------------------------
 # Generation helpers
 # ---------------------------------------------------------------------------
- EVENT_TYPE_BUDGETS = {
+
+EVENT_TYPE_BUDGETS = {
     "conference": (800000, 1800000, 4200000),
     "award show": (1200000, 2600000, 6500000),
     "brand launch": (900000, 2200000, 5500000),
@@ -849,6 +850,23 @@ def get_voice_messages(session_id: str, user_id: str, limit: int = 30) -> List[D
     "festival": (1200000, 2800000, 7200000),
     "generic": (500000, 1200000, 3000000),
 }
+
+def infer_event_type(text: str, event_type: Optional[str]) -> str:
+    if event_type:
+        return event_type
+    t = (text or "").lower()
+    for name in EVENT_TYPE_BUDGETS.keys():
+        if name != "generic" and name in t:
+            return name
+    if "launch" in t:
+        return "brand launch"
+    if "award" in t:
+        return "award show"
+    if "school" in t:
+        return "school"
+    if "college" in t:
+        return "college"
+    return "generic"
 
 def save_text_file(folder: Path, filename: str, content: str) -> Dict[str, str]:
     folder.mkdir(parents=True, exist_ok=True)
