@@ -1951,9 +1951,20 @@ def root():
 def root():
     return {"message": "BriefCraft API is live"}
 
+@app.get("/")
+def root():
+    return {"message": "BriefCraft API is live"}
+
 
 @app.post("/signup")
-def signup(...):
+def signup(payload: SignupRequest):
+    # your existing signup code here
+    ...
+
+
+
+@app.post("/signup")
+async def signup(payload: SignupRequest):
     ...
 
 
