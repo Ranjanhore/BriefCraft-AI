@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -14,6 +13,11 @@ from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 from supabase import Client, create_client
+from pathlib import Path
+import os
+
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./media")).resolve()
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 load_dotenv()
 
@@ -288,7 +292,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./media")).resolve()
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/renders", StaticFiles(directory=str(RENDER_OUTPUT_DIR)), name="renders")
 
