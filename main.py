@@ -1726,8 +1726,11 @@ def login(payload: LoginInput):
     user = get_user_by_email(payload.email)
     if not user:
         raise HTTPException(status_code=400, detail="User not found")
-    if not verify_password(payload.password, user.get("password_hash") or ""):
+
+    password_hash = user.get("password_hash") or user.get("password")
+    if not password_hash or not verify_password(payload.password, password_hash):
         raise HTTPException(status_code=400, detail="Wrong password")
+
     token = create_access_token(str(user["id"]))
     return {
         "access_token": token,
