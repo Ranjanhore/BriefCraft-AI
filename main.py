@@ -93,6 +93,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR = BASE_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+RENDER_OUTPUT_DIR = BASE_DIR / "renders"
+RENDER_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
