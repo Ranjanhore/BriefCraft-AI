@@ -83,8 +83,13 @@ app.add_middleware(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
 MEDIA_DIR = BASE_DIR / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
