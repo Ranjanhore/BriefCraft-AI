@@ -30,6 +30,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip() or "*"
 EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "./exports")).resolve()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
+RENDER_OUTPUT_DIR = Path(os.getenv("RENDER_OUTPUT_DIR", "./renders")).resolve()
 
 def _split_origins(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
