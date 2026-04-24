@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import base64
-import io
-import json
 import os
-import re
-import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+# other imports...
 
-import psycopg
-import requests
+from openai import OpenAI
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+JWT_SECRET = os.getenv("JWT_SECRET")
+
 from dotenv import load_dotenv
 from fastapi import Query, HTTPException
 import json
