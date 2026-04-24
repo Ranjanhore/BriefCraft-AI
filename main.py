@@ -90,6 +90,9 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+EXPORT_DIR = BASE_DIR / "exports"
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
