@@ -17,108 +17,22 @@ from dotenv import load_dotenv
 from fastapi import Query, HTTPException
 import json
 
+from fastapi import FastAPI, HTTPException, Query
+import json
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"message": "BriefCraft API is live"}
+
 @app.post("/signup")
 def signup(payload: str = Query(...)):
-    try:
-        data = json.loads(payload)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid payload JSON")
-
-    email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    full_name = (data.get("full_name") or "").strip()
-
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password required")
-
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("select id from users where email=%s", (email,))
-                existing = cur.fetchone()
-                if existing:
-                    raise HTTPException(status_code=400, detail="User already exists")
-
-                hashed = hash_password(password)
-
-                cur.execute("""
-                    insert into users (email, password_hash, full_name, role, is_active)
-                    values (%s, %s, %s, %s, %s)
-                    returning id, email, full_name, role, is_active, created_at
-                """, (email, hashed, full_name or None, "user", True))
-
-                user = cur.fetchone()
-                conn.commit()
-
-        return {
-            "message": "Signup successful",
-            "user": user
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.staticfiles import StaticFiles
-from jose import JWTError, jwt
-from openai import OpenAI
-from passlib.context import CryptContext
-from psycopg.rows import dict_row
-from pydantic import BaseModel, Field, field_validator
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfbase.pdfmetrics import stringWidth
-from reportlab.pdfgen import canvas
-
-load_dotenv()
-
-APP_NAME = os.getenv("APP_TITLE", "Creative Brief to Concept & Execution API").strip() or "Creative Brief to Concept & Execution API"
-APP_VERSION = "1.0.0"
-
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", os.getenv("TEXT_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
-TTS_MODEL = os.getenv("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
-TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
-TTS_VOICE = os.getenv("TTS_VOICE", "coral").strip() or "coral"
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1"
-IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high").strip() or "high"
-
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip() or "http://localhost:3000"
-VISUAL_ASPECT_RATIO = os.getenv("VISUAL_ASPECT_RATIO", "16:9").strip() or "16:9"
-VISUAL_PREVIEW_SIZE = os.getenv("VISUAL_PREVIEW_SIZE", "1280x720").strip() or "1280x720"
-VISUAL_MASTER_SIZE = os.getenv("VISUAL_MASTER_SIZE", "1920x1080").strip() or "1920x1080"
-VISUAL_PRINT_SIZE = os.getenv("VISUAL_PRINT_SIZE", "3840x2160").strip() or "3840x2160"
-
-MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./media")).resolve()
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
-EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "./exports")).resolve()
-RENDER_OUTPUT_DIR = Path(os.getenv("RENDER_OUTPUT_DIR", "./renders")).resolve()
-VOICE_DIR = Path(os.getenv("VOICE_DIR", str(MEDIA_DIR / "voice"))).resolve()
-
-for _path in (MEDIA_DIR, UPLOAD_DIR, EXPORT_DIR, RENDER_OUTPUT_DIR, VOICE_DIR):
-    _path.mkdir(parents=True, exist_ok=True)
-
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render").strip() or "change-me-in-render"
-ACCESS_TOKEN_HOURS = int(os.getenv("ACCESS_TOKEN_HOURS", "24") or "24")
-ALGORITHM = "HS256"
-
-SHOW_GATEWAY_URL = os.getenv("SHOW_GATEWAY_URL", "").strip()
-COMPANION_BASE_URL = os.getenv("COMPANION_BASE_URL", "").strip()
-RESOLUME_BASE_URL = os.getenv("RESOLUME_BASE_URL", "").strip()
-QLAB_OSC_IP = os.getenv("QLAB_OSC_IP", "").strip()
-QLAB_OSC_PORT = int(os.getenv("QLAB_OSC_PORT", "0") or 0)
-EOS_OSC_IP = os.getenv("EOS_OSC_IP", "").strip()
-EOS_OSC_PORT = int(os.getenv("EOS_OSC_PORT", "0") or 0)
-
-EMAIL_RE = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.I)
-
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-auth_scheme = HTTPBearer(auto_error=False)
-
+    data = json.loads(payload)
+    email = data.get("email")
+    password = data.get("password")
+    full_name = data.get("full_name")
+    return {"email": email, "full_name": full_name}
 def _split_origins(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
