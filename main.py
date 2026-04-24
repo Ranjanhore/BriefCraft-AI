@@ -131,7 +131,20 @@ ALLOWED_ORIGINS = _split_origins(
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-app = FastAPI(title=APP_NAME, version=APP_VERSION)
+from fastapi import FastAPI, HTTPException, Query
+import json
+
+app = FastAPI()
+
+# middleware, mounts, helpers, models, db helpers, etc...
+
+@app.get("/")
+def root():
+    return {"message": "BriefCraft API is live"}
+
+@app.post("/signup")
+def signup(payload: str = Query(...)):
+    ...
 
 app.add_middleware(
     CORSMiddleware,
