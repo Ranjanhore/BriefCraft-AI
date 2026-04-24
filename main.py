@@ -14,7 +14,51 @@ from typing import Any, Dict, List, Optional
 import psycopg
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Query, HTTPException
+import json
+
+@app.post("/signup")
+def signup(payload: str = Query(...)):
+    try:
+        data = json.loads(payload)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payload JSON")
+
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    full_name = (data.get("full_name") or "").strip()
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("select id from users where email=%s", (email,))
+                existing = cur.fetchone()
+                if existing:
+                    raise HTTPException(status_code=400, detail="User already exists")
+
+                hashed = hash_password(password)
+
+                cur.execute("""
+                    insert into users (email, password_hash, full_name, role, is_active)
+                    values (%s, %s, %s, %s, %s)
+                    returning id, email, full_name, role, is_active, created_at
+                """, (email, hashed, full_name or None, "user", True))
+
+                user = cur.fetchone()
+                conn.commit()
+
+        return {
+            "message": "Signup successful",
+            "user": user
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
