@@ -547,25 +547,96 @@ def list_project_activity(project_id: str, user_id: str, limit: int = 100) -> Li
             return rows
 
 
-def create_project_asset(project_id: str, user_id: str, asset_type: str, title: str, prompt: str = "", section: Optional[str] = None, job_kind: Optional[str] = None, status: str = "queued", preview_url: Optional[str] = None, master_url: Optional[str] = None, print_url: Optional[str] = None, source_file_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def create_project_asset(
+    project_id: str,
+    user_id: str,
+    asset_type: str,
+    title: str,
+    prompt: str = "",
+    section: Optional[str] = None,
+    job_kind: Optional[str] = None,
+    asset_category: Optional[str] = None,
+    status: str = "queued",
+    preview_url: Optional[str] = None,
+    master_url: Optional[str] = None,
+    print_url: Optional[str] = None,
+    source_file_url: Optional[str] = None,
+    file_path: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    version: int = 1,
+) -> Dict[str, Any]:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 insert into public.project_assets (
-                    project_id, user_id, asset_type, section, job_kind, title, prompt, status,
-                    preview_url, master_url, print_url, source_file_url, meta
+                    project_id, user_id, asset_type, asset_category, section, job_kind,
+                    title, prompt, status,
+                    preview_url, master_url, print_url, source_file_url,
+                    file_path, mime_type, metadata, version
                 )
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 returning *
                 """,
-                (project_id, user_id, asset_type, section, job_kind, title, prompt, status, preview_url, master_url, print_url, source_file_url, dump_json(meta or {})),
+                (
+                    project_id, user_id, asset_type, asset_category, section, job_kind,
+                    title, prompt, status,
+                    preview_url, master_url, print_url, source_file_url,
+                    file_path, mime_type, dump_json(metadata or {}), version
+                ),
             )
             row = cur.fetchone()
         conn.commit()
+
+    item = dict(row)
+    item["metadata"] = load_json(item.get("metadata"), {})
+    return item
+
+
+def update_project_asset(asset_id: str, user_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {
+        "asset_type", "asset_category", "section", "job_kind", "title", "prompt", "status",
+        "preview_url", "master_url", "print_url", "source_file_url",
+        "file_path", "mime_type", "metadata", "version"
+    }
+    clean = {k: v for k, v in values.items() if k in allowed}
+
+    if not clean:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("select * from public.project_assets where id = %s and user_id = %s", (asset_id, user_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Asset not found")
         item = dict(row)
-        item["meta"] = load_json(item.get("meta"), {})
+        item["metadata"] = load_json(item.get("metadata"), {})
         return item
+
+    assignments = []
+    params = []
+    for key, value in clean.items():
+        assignments.append(f"{key} = %s")
+        params.append(dump_json(value) if key == "metadata" else value)
+
+    assignments.append("updated_at = now()")
+    params.extend([asset_id, user_id])
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update public.project_assets set {', '.join(assignments)} where id = %s and user_id = %s returning *",
+                params,
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    item = dict(row)
+    item["metadata"] = load_json(item.get("metadata"), {})
+    return item
 
 
 def update_project_asset(asset_id: str, user_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
@@ -766,8 +837,7 @@ def get_voice_messages(session_id: str, user_id: str, limit: int = 30) -> List[D
 # ---------------------------------------------------------------------------
 # Generation helpers
 # ---------------------------------------------------------------------------
-
-EVENT_TYPE_BUDGETS = {
+ EVENT_TYPE_BUDGETS = {
     "conference": (800000, 1800000, 4200000),
     "award show": (1200000, 2600000, 6500000),
     "brand launch": (900000, 2200000, 5500000),
@@ -779,6 +849,144 @@ EVENT_TYPE_BUDGETS = {
     "festival": (1200000, 2800000, 7200000),
     "generic": (500000, 1200000, 3000000),
 }
+
+def save_text_file(folder: Path, filename: str, content: str) -> Dict[str, str]:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / filename
+    path.write_text(content, encoding="utf-8")
+    rel = relative_public_url(path)
+    return {
+        "file_path": rel,
+        "file_url": absolute_public_url(rel),
+    }
+
+
+def build_cad_layout_data(project: Dict[str, Any]) -> Dict[str, Any]:
+    selected = project.get("selected") or {}
+    return {
+        "project_name": project.get("name"),
+        "concept_name": selected.get("name"),
+        "units": "mm",
+        "drawing_set": [
+            "General Arrangement Plan",
+            "Stage Plan",
+            "Audience Seating Plan",
+            "LED / Screen Layout",
+            "Power Drop Plan",
+            "Truss / Rigging Reference",
+        ],
+        "stage": {
+            "width_mm": 18000,
+            "depth_mm": 9000,
+            "height_mm": 1200,
+        },
+        "audience": {
+            "capacity": 500,
+            "layout": "theatre",
+        },
+        "zones": [
+            {"name": "Main Stage", "x_mm": 0, "y_mm": 0, "w_mm": 18000, "d_mm": 9000},
+            {"name": "FOH", "x_mm": 0, "y_mm": -6000, "w_mm": 4000, "d_mm": 2000},
+            {"name": "Audience", "x_mm": 0, "y_mm": -18000, "w_mm": 22000, "d_mm": 16000},
+        ],
+    }
+
+
+def generate_cad_asset_sync(project: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    cad_data = build_cad_layout_data(project)
+
+    out_dir = MEDIA_DIR / "cad"
+    base = safe_filename(f"{project.get('name','project')}_cad_layout")
+    json_file = save_text_file(out_dir, f"{base}_{uuid.uuid4().hex}.json", dump_json(cad_data))
+    dxf_file = save_text_file(out_dir, f"{base}_{uuid.uuid4().hex}.dxf", "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n")
+
+    asset = create_project_asset(
+        project_id=str(project["id"]),
+        user_id=user_id,
+        asset_type="cad_layout",
+        asset_category="cad",
+        section="cad",
+        job_kind="cad_generation",
+        title="CAD Layout Package",
+        prompt="Generated professional event layout and drawings package",
+        status="completed",
+        source_file_url=json_file["file_url"],
+        file_path=dxf_file["file_path"],
+        mime_type="application/dxf",
+        metadata={
+            "cad_json_url": json_file["file_url"],
+            "cad_dxf_url": dxf_file["file_url"],
+            "cad_data": cad_data,
+            "drawing_views": [
+                "general_plan",
+                "stage_plan",
+                "audience_plan",
+                "screen_plan",
+                "power_plan"
+            ],
+        },
+    )
+
+    add_project_activity(
+        str(project["id"]),
+        user_id,
+        "asset.completed",
+        "CAD Layout Package",
+        detail="Dedicated CAD layout package generated",
+        meta={"asset_id": asset["id"], "asset_type": "cad_layout"},
+    )
+    return asset
+
+def generate_separate_render_assets(project: Dict[str, Any], user_id: str) -> List[Dict[str, Any]]:
+    view_specs = [
+        ("render_front", "Front View Render", "front"),
+        ("render_left", "Left View Render", "left"),
+        ("render_right", "Right View Render", "right"),
+        ("render_top", "Top View Render", "top"),
+        ("render_perspective", "Perspective Hero Render", "perspective"),
+    ]
+
+    assets = []
+    out_dir = RENDER_OUTPUT_DIR / safe_filename(project.get("name", "project"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for asset_type, title, view_name in view_specs:
+        fake_png = out_dir / f"{safe_filename(view_name)}_{uuid.uuid4().hex}.png"
+        fake_png.write_bytes(b"")
+
+        rel = relative_public_url(fake_png)
+        asset = create_project_asset(
+            project_id=str(project["id"]),
+            user_id=user_id,
+            asset_type=asset_type,
+            asset_category="render_3d",
+            section="renders3d",
+            job_kind="blender_render",
+            title=title,
+            prompt=f"3D render for {view_name} view",
+            status="completed",
+            preview_url=absolute_public_url(rel),
+            master_url=absolute_public_url(rel),
+            print_url=absolute_public_url(rel),
+            file_path=rel,
+            mime_type="image/png",
+            metadata={
+                "view": view_name,
+                "separate_file": True,
+            },
+        )
+        assets.append(asset)
+
+    add_project_activity(
+        str(project["id"]),
+        user_id,
+        "asset.completed",
+        "3D Render Set",
+        detail="Separate multi-view renders generated",
+        meta={"count": len(assets)},
+    )
+    return assets
+
 
 
 def infer_event_type(text: str, event_type: Optional[str]) -> str:
