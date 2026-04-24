@@ -1933,6 +1933,24 @@ def health():
         },
     }
 
+app = FastAPI(title="BriefCraft AI")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def root():
+    return {"message": "BriefCraft API is live"}
+
+@app.post("/signup")
+def signup(...):
+    ...
+
 
 @app.post("/signup")
 def signup(payload: UserInput):
