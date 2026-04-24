@@ -1947,6 +1947,11 @@ app.add_middleware(
 def root():
     return {"message": "BriefCraft API is live"}
 
+@app.get("/")
+def root():
+    return {"message": "BriefCraft API is live"}
+
+
 @app.post("/signup")
 def signup(...):
     ...
