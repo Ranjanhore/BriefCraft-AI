@@ -1,19 +1,33 @@
 
-from __future__ import annotations
-
-import base64
 import os
-# other imports...
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+import psycopg
+import requests
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware import Middleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
+
+print("MAIN.PY BUILD: APR-25-FIX-1")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 JWT_SECRET = os.getenv("JWT_SECRET")
 
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 from dotenv import load_dotenv
 from fastapi import Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import json
 
 from fastapi import FastAPI, HTTPException, Query
@@ -1904,14 +1918,6 @@ def health():
     }
 
 app = FastAPI(title="BriefCraft AI")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.get("/")
 def root():
