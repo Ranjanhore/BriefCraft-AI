@@ -20,10 +20,22 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    _OPENAI_AVAILABLE = True
+except ImportError:
+    _OPENAI_AVAILABLE = False
+    class OpenAI:
+        def __init__(self, **kw): pass
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, field_validator
-from supabase import Client, create_client
+try:
+    from supabase import Client, create_client
+    _SUPABASE_AVAILABLE = True
+except ImportError:
+    _SUPABASE_AVAILABLE = False
+    Client = None
+    def create_client(*a, **kw): return None
 
 print("MAIN.PY BUILD: APR-25-CLEAN")
 
