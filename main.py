@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import psycopg
 import requests
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware import Middleware
 from fastapi.responses import JSONResponse
@@ -366,7 +367,12 @@ def create_user(email: str, password: str, full_name: Optional[str]) -> Dict[str
         conn.commit()
         return row
 
+auth_scheme = HTTPBearer(auto_error=False)
 
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme)) -> Dict[str, Any]:
+    ...
+
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme)) -> Dict[str, Any]:
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Authentication required")
