@@ -640,6 +640,7 @@ def add_project_activity(project_id: str, user_id: str, event_type: str, title: 
             "project_id": project_id,
             "user_id": user_id,
             "event_type": event_type,
+            "activity_type": event_type,
             "title": title,
             "detail": detail,
             "meta": meta or {},
