@@ -33,15 +33,15 @@ PORT = int(os.getenv("PORT", "10000"))
 ALGORITHM = "HS256"
 TOKEN_HOURS = 72
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-BASE_DIR       = Path(**file**).resolve().parent
-EXPORT_DIR     = (BASE_DIR / “exports”).resolve()
-UPLOAD_DIR     = (BASE_DIR / “uploads”).resolve()
-MEDIA_DIR      = (BASE_DIR / “media”).resolve()
-RENDER_DIR     = (BASE_DIR / “renders”).resolve()
-VOICE_DIR      = MEDIA_DIR / “voice”
-for _d in [EXPORT_DIR, UPLOAD_DIR, MEDIA_DIR, RENDER_DIR, VOICE_DIR]:
-_d.mkdir(parents=True, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+EXPORT_DIR = (BASE_DIR / "exports").resolve()
+UPLOAD_DIR = (BASE_DIR / "uploads").resolve()
+MEDIA_DIR = (BASE_DIR / "media").resolve()
+RENDER_DIR = (BASE_DIR / "renders").resolve()
+VOICE_DIR = MEDIA_DIR / "voice"
 
+for _d in [EXPORT_DIR, UPLOAD_DIR, MEDIA_DIR, RENDER_DIR, VOICE_DIR]:
+    _d.mkdir(parents=True, exist_ok=True)
 ALLOWED_ORIGINS = [
 “http://localhost:3000”, “http://127.0.0.1:3000”,
 “http://localhost:5173”, “http://127.0.0.1:5173”,
