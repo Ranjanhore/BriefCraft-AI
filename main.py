@@ -1986,29 +1986,20 @@ def generate_separated_renders_logic(project_id: str, user_id: str):
         },
     ]
 
-    assets = []
+    assets: List[Dict[str, Any]] = []
 
     for view in render_views:
         title = view["title"]
         prompt = view["prompt"]
 
-        image_url = generate_render_image(prompt)
-
-        asset = db_insert(
-            "project_assets",
-            {
-                "project_id": project_id,
-                "user_id": user_id,
-                "asset_type": "3d_render",
-                "section": "renders",
-                "job_kind": "separate_render_view",
-                "title": title,
-                "prompt": prompt,
-                "preview_url": image_url,
-                "master_url": image_url,
-                "source_file_url": image_url,
-                "status": "completed",
-            },
+        asset = sync_create_visual_asset(
+            project,
+            user_id,
+            "3d_render",
+            title,
+            prompt,
+            section="renders",
+            job_kind="separate_render_view",
         )
 
         assets.append(asset_row_to_dict(asset))
@@ -2021,10 +2012,14 @@ def generate_separated_renders_logic(project_id: str, user_id: str):
         detail=f"{len(assets)} separated render views created",
     )
 
+    update_project_media_rollups(project_id, user_id)
+
     return {
         "message": "Separate render views generated",
         "assets": assets,
     }
+
+
 @app.post("/projects/{project_id}/renders/generate-separated")
 def generate_separated_renders(
     project_id: str,
