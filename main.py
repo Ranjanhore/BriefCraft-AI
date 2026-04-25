@@ -1,7 +1,6 @@
-“””
-AICreative Studio — BriefCraft AI Backend
-BUILD: APR-25-V4-FINAL
-“””
+"""
+BriefCraft AI backend
+"""
 from **future** import annotations
 import base64, io, json, os, re, uuid
 from datetime import datetime, timedelta, timezone
