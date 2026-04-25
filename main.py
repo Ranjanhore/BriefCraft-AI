@@ -711,23 +711,25 @@ def asset_row_to_dict(row):
     if not row:
         return {}
 
+    item = dict(row)
+
     return {
-        "id": row.get("id"),
-        "project_id": row.get("project_id"),
-        "user_id": row.get("user_id"),
-        "asset_type": row.get("asset_type"),
-        "section": row.get("section"),
-        "job_kind": row.get("job_kind"),
-        "title": row.get("title"),
-        "prompt": row.get("prompt"),
-        "status": row.get("status"),
-        "preview_url": row.get("preview_url"),
-        "master_url": row.get("master_url"),
-        "print_url": row.get("print_url"),
-        "source_file_url": row.get("source_file_url"),
-        "meta": load_json(row.get("meta"), {}),
-        "created_at": row.get("created_at"),
-        "updated_at": row.get("updated_at"),
+        "id": item.get("id"),
+        "project_id": item.get("project_id"),
+        "user_id": item.get("user_id"),
+        "asset_type": item.get("asset_type"),
+        "section": item.get("section"),
+        "job_kind": item.get("job_kind"),
+        "title": item.get("title"),
+        "prompt": item.get("prompt"),
+        "status": item.get("status"),
+        "preview_url": item.get("preview_url"),
+        "master_url": item.get("master_url"),
+        "print_url": item.get("print_url"),
+        "source_file_url": item.get("source_file_url"),
+        "meta": load_json(item.get("meta")),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
     }
 
 
