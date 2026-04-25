@@ -73,12 +73,15 @@ CAD_DIR = (MEDIA_DIR / "cad").resolve()
 for _path in (EXPORT_DIR, UPLOAD_DIR, MEDIA_DIR, RENDER_OUTPUT_DIR, VOICE_DIR, PDF_DIR, CAD_DIR):
     _path.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+def _split_origins(value: str) -> list[str]:
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+ALLOWED_ORIGINS = _split_origins(
+    os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://briefly-sparkle.lovable.app",
+    )
+)
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 app.add_middleware(
