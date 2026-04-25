@@ -7,9 +7,26 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from jose import jwt
+
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+TOKEN_HOURS = 72
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
+    payload = {
+        "sub": user_id,
+        "exp": expire,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+if __name__ == "__main__":
+    user_id = "693d347e-b791-4dfe-b275-b5fff2de3df7"
+    print(create_access_token(user_id))
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
