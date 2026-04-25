@@ -1019,10 +1019,12 @@ def generate_voice_reply(current_user: Dict[str, Any], session: Dict[str, Any], 
 # Pydantic models
 # ------------------------------------------------------------------------------
 
-class SignupIn(BaseModel):
-    email: str
-    password: str = Field(min_length=8, max_length=128)
-    full_name: Optional[str] = Field(default=None, max_length=120)
+@field_validator("password")
+@classmethod
+def validate_password_length(cls, value: str) -> str:
+    if len(value.encode("utf-8")) > 72:
+        raise ValueError("Password must be 72 bytes or less")
+    return value
 
     @field_validator("email")
     @classmethod
