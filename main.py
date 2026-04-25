@@ -1447,6 +1447,31 @@ def list_comments(project_id: str, current_user: Dict[str, Any] = Depends(get_cu
 # ------------------------------------------------------------------------------
 # Departments
 # ------------------------------------------------------------------------------
+def console_state(project: Dict[str, Any]) -> Dict[str, Any]:
+    state = project.get("department_outputs") or {}
+
+    if isinstance(state, str):
+        state = load_json(state, {}) or {}
+
+    if not isinstance(state, dict):
+        state = {}
+
+    state.setdefault("armed", False)
+    state.setdefault("hold", False)
+    state.setdefault("console_index", 0)
+    state.setdefault("execution_log", [])
+
+    return state
+
+
+def log_console_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    history = list(state.get("execution_log") or [])
+    history.append({"time": now_iso(), **event})
+    state["execution_log"] = history[-200:]
+    state["last_status"] = event.get("status")
+    return state
+
+
 def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
     project = get_project_by_id(project_id, user_id)
     if not project:
