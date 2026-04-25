@@ -87,7 +87,7 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)?(lovable\.(app|dev)|lovableproject\.com)$"
+    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)?(lovable\.(app|dev)|lovableproject\.com)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
