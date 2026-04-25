@@ -731,7 +731,6 @@ def asset_row_to_dict(row):
     }
 
 
-@with_db
 def list_project_assets(cur, project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
     if section:
         cur.execute(
