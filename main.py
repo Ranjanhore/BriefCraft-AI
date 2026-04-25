@@ -43,15 +43,19 @@ VOICE_DIR = MEDIA_DIR / "voice"
 for _d in [EXPORT_DIR, UPLOAD_DIR, MEDIA_DIR, RENDER_DIR, VOICE_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 ALLOWED_ORIGINS = [
-“http://localhost:3000”, “http://127.0.0.1:3000”,
-“http://localhost:5173”, “http://127.0.0.1:5173”,
-“https://briefly-sparkle.lovable.app”,
-“https://aicreative.studio”,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ]
-for _o in os.getenv(“ALLOWED_ORIGINS”, “”).split(”,”):
-_o = _o.strip()
-if _o and _o not in ALLOWED_ORIGINS:
-ALLOWED_ORIGINS.append(_o)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Optional heavy imports ──────────────────────────────────────────────────────
 
