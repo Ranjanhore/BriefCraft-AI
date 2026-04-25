@@ -1963,39 +1963,12 @@ def generate_moodboards_endpoint(project_id: str, payload: MoodboardGenerateInpu
     return {"message": "Moodboards processed", "assets": assets, "jobs": queued_jobs}
 
 @app.post("/projects/{project_id}/renders/generate-separated")
-def generate_separated_renders_logic(project_id: str, user_id: str):
-    assets = []
-
-    for view in render_views:
-        title = view["title"]
-        prompt = view["prompt"]
-
-        image_url = generate_render_image(prompt)   # or whatever your code uses
-
-        asset = db_insert(
-            "project_assets",
-            {
-                "project_id": project_id,
-                "user_id": user_id,
-                "asset_type": "3d_render",
-                "section": "renders",
-                "job_kind": "separate_render_view",
-                "title": title,
-                "prompt": prompt,
-                "preview_url": image_url,
-                "master_url": image_url,
-                "source_file_url": image_url,
-                "status": "completed",
-            },
-        )
-
-        assets.append(asset_row_to_dict(asset))
-
-    return {
-        "message": "Separate render views generated",
-        "assets": assets,
-    }
-
+def generate_separated_renders(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    return generate_separated_renders_logic(project_id, str(current_user["id"]))
+    
 @app.post("/projects/{project_id}/jobs/queue")
 def queue_job_endpoint(project_id: str, payload: JobCreateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = str(current_user["id"])
