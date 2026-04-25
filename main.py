@@ -80,7 +80,8 @@ class JWTError(Exception): pass
 
 try:
 from passlib.context import CryptContext
-_pwd = CryptContext(schemes=[“bcrypt”], deprecated=“auto”)
+_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+auth_scheme = HTTPBearer(auto_error=False)
 _PWD_OK = True
 except ImportError:
 _pwd = None
