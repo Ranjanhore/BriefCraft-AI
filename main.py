@@ -1034,6 +1034,26 @@ def validate_password_length(cls, value: str) -> str:
             raise ValueError("Invalid email address")
         return email
 
+class SignupIn(BaseModel):
+    email: str
+    password: str = Field(min_length=8, max_length=72)
+    full_name: Optional[str] = None
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        email = value.strip().lower()
+        if not EMAIL_RE.match(email):
+            raise ValueError("Invalid email address")
+        return email
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_length(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be 72 bytes or less")
+        return value
+
 class LoginIn(BaseModel):
     email: str
     password: str
@@ -1200,6 +1220,7 @@ def health():
 def signup(payload: SignupIn):
     if db_get("users", email=payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
+
     user_id = str(uuid.uuid4())
     user = db_insert(
         "users",
@@ -1213,8 +1234,10 @@ def signup(payload: SignupIn):
             "projects_limit": 100,
         },
     )
+
     token = create_access_token(user_id)
     safe_user = {k: v for k, v in user.items() if k != "password"}
+
     return {
         "message": "User created",
         "user_id": user_id,
