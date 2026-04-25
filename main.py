@@ -1962,6 +1962,69 @@ def generate_moodboards_endpoint(project_id: str, payload: MoodboardGenerateInpu
     update_project_media_rollups(project_id, user_id)
     return {"message": "Moodboards processed", "assets": assets, "jobs": queued_jobs}
 
+
+def generate_separated_renders_logic(project_id: str, user_id: str):
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    selected = project.get("selected_concept") or {}
+    concept_name = selected.get("name") or "Event Concept"
+
+    render_views = [
+        {
+            "title": f"{concept_name} Hero Perspective",
+            "prompt": f"Create a premium 16:9 hero camera view for event concept {concept_name} with dramatic stage reveal, polished materials, cinematic lighting, ultra realistic 3D render."
+        },
+        {
+            "title": f"{concept_name} Side View",
+            "prompt": f"Create a premium 16:9 side perspective render for event concept {concept_name} showing scenic depth, LED surfaces, stage layout, ultra realistic 3D render."
+        },
+        {
+            "title": f"{concept_name} Top View",
+            "prompt": f"Create a premium 16:9 top or elevated view render for event concept {concept_name} showing stage zoning, guest layout, scenic structure, ultra realistic 3D render."
+        },
+    ]
+
+    assets = []
+
+    for view in render_views:
+        title = view["title"]
+        prompt = view["prompt"]
+
+        image_url = generate_render_image(prompt)
+
+        asset = db_insert(
+            "project_assets",
+            {
+                "project_id": project_id,
+                "user_id": user_id,
+                "asset_type": "3d_render",
+                "section": "renders",
+                "job_kind": "separate_render_view",
+                "title": title,
+                "prompt": prompt,
+                "preview_url": image_url,
+                "master_url": image_url,
+                "source_file_url": image_url,
+                "status": "completed",
+            },
+        )
+
+        assets.append(asset_row_to_dict(asset))
+
+    add_project_activity(
+        project_id,
+        user_id,
+        "renders.generated",
+        "Separate render views generated",
+        detail=f"{len(assets)} separated render views created",
+    )
+
+    return {
+        "message": "Separate render views generated",
+        "assets": assets,
+    }
 @app.post("/projects/{project_id}/renders/generate-separated")
 def generate_separated_renders(
     project_id: str,
@@ -1969,6 +2032,9 @@ def generate_separated_renders(
 ):
     return generate_separated_renders_logic(project_id, str(current_user["id"]))
     
+
+
+
 @app.post("/projects/{project_id}/jobs/queue")
 def queue_job_endpoint(project_id: str, payload: JobCreateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = str(current_user["id"])
