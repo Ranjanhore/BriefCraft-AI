@@ -1447,6 +1447,57 @@ def list_comments(project_id: str, current_user: Dict[str, Any] = Depends(get_cu
 # ------------------------------------------------------------------------------
 # Departments
 # ------------------------------------------------------------------------------
+def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.get("selected_concept"):
+        raise HTTPException(status_code=400, detail="Select a concept first")
+
+    sound_data = default_sound_plan(project)
+    lighting_data = default_lighting_plan(project)
+    showrunner_data = default_showrunner_plan(project)
+
+    state = console_state(project)
+    state.update({
+        "sound_ready": True,
+        "lighting_ready": True,
+        "showrunner_ready": True,
+        "console_index": 0,
+        "hold": False,
+    })
+
+    updated = db_update(
+        "projects",
+        project_id,
+        {
+            "sound_data": sound_data,
+            "lighting_data": lighting_data,
+            "showrunner_data": showrunner_data,
+            "department_outputs": state,
+            "scene_json": build_scene_json(project),
+            "status": "departments_ready",
+        },
+    )
+
+    add_project_activity(
+        project_id,
+        user_id,
+        "departments.generated",
+        "Departments generated",
+        detail="Sound, lighting, showrunner ready",
+    )
+
+    return {
+        "message": "Departments generated",
+        "project_id": project_id,
+        "sound_data": sound_data,
+        "lighting_data": lighting_data,
+        "showrunner_data": showrunner_data,
+        "project": updated,
+    }
+
 
 def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
     project = get_project_by_id(project_id, user_id)
