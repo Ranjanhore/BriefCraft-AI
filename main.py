@@ -19,21 +19,20 @@ print("BUILD: APR-25-V4-FINAL - starting up")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-OPENAI_API_KEY = os.getenv(“OPENAI_API_KEY”, “”).strip()
-SUPABASE_URL   = os.getenv(“SUPABASE_URL”, “”).strip()
-SUPABASE_KEY   = (os.getenv(“SUPABASE_SERVICE_ROLE_KEY”) or os.getenv(“SUPABASE_KEY”, “”)).strip()
-SECRET_KEY     = (os.getenv(“JWT_SECRET”) or os.getenv(“SECRET_KEY”, “change-me-32char-secret-key-xx”)).strip()
-OPENAI_MODEL   = os.getenv(“OPENAI_MODEL”, “gpt-4o”).strip()
-IMAGE_MODEL    = os.getenv(“IMAGE_MODEL”, “dall-e-3”).strip()
-IMAGE_QUALITY  = os.getenv(“IMAGE_QUALITY”, “standard”).strip()
-TTS_MODEL      = os.getenv(“TTS_MODEL”, “tts-1”).strip()
-TTS_VOICE      = os.getenv(“TTS_VOICE”, “alloy”).strip()
-TRANSCRIBE_MDL = os.getenv(“TRANSCRIBE_MODEL”, “whisper-1”).strip()
-PORT           = int(os.getenv(“PORT”, “10000”))
-ALGORITHM      = “HS256”
-TOKEN_HOURS    = 72
-EMAIL_RE       = re.compile(r’^[^@\s]+@[^@\s]+.[^@\s]+$’)
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")).strip()
+SECRET_KEY = (os.getenv("JWT_SECRET") or os.getenv("SECRET_KEY", "change-me-32char-secret-key-xx")).strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "dall-e-3").strip()
+IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "standard").strip()
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1").strip()
+TTS_VOICE = os.getenv("TTS_VOICE", "alloy").strip()
+TRANSCRIBE_MDL = os.getenv("TRANSCRIBE_MODEL", "whisper-1").strip()
+PORT = int(os.getenv("PORT", "10000"))
+ALGORITHM = "HS256"
+TOKEN_HOURS = 72
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 BASE_DIR       = Path(**file**).resolve().parent
 EXPORT_DIR     = (BASE_DIR / “exports”).resolve()
 UPLOAD_DIR     = (BASE_DIR / “uploads”).resolve()
