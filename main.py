@@ -15,7 +15,7 @@ load_dotenv()
 except ImportError:
 pass
 
-print(“BUILD: APR-25-V4-FINAL — starting up”)
+print("BUILD: APR-25-V4-FINAL - starting up")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
