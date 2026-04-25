@@ -5,6 +5,20 @@ import base64
 import io
 import json
 import os
+from datetime import datetime, timedelta, timezone
+from jose import jwt
+
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render")
+ALGORITHM = "HS256"
+TOKEN_HOURS = int(os.getenv("ACCESS_TOKEN_HOURS", "72"))
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
+    payload = {
+        "sub": user_id,
+        "exp": expire,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 import re
 import uuid
 from pathlib import Path
@@ -12,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render")
 ALGORITHM = "HS256"
 TOKEN_HOURS = 72
 
