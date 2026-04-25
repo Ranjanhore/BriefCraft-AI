@@ -597,10 +597,28 @@ def build_scene_json(project: Dict[str, Any]) -> Dict[str, Any]:
 # Assets / jobs / activity helpers
 # ------------------------------------------------------------------------------
 
-def asset_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    item = dict(row)
-    item["meta"] = load_json(item.get("meta"), {})
-    return item
+def asset_row_to_dict(row):
+    if not row:
+        return {}
+
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "user_id": row.get("user_id"),
+        "asset_type": row.get("asset_type"),
+        "section": row.get("section"),
+        "job_kind": row.get("job_kind"),
+        "title": row.get("title"),
+        "prompt": row.get("prompt"),
+        "status": row.get("status"),
+        "preview_url": row.get("preview_url"),
+        "master_url": row.get("master_url"),
+        "print_url": row.get("print_url"),
+        "source_file_url": row.get("source_file_url"),
+        "meta": load_json(row.get("meta"), {}),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
 
 def job_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     item = dict(row)
@@ -686,6 +704,30 @@ def create_project_asset(
         },
     )
     return asset_row_to_dict(row)
+
+def asset_row_to_dict(row):
+    if not row:
+        return {}
+
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "user_id": row.get("user_id"),
+        "asset_type": row.get("asset_type"),
+        "section": row.get("section"),
+        "job_kind": row.get("job_kind"),
+        "title": row.get("title"),
+        "prompt": row.get("prompt"),
+        "status": row.get("status"),
+        "preview_url": row.get("preview_url"),
+        "master_url": row.get("master_url"),
+        "print_url": row.get("print_url"),
+        "source_file_url": row.get("source_file_url"),
+        "meta": load_json(row.get("meta"), {}),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
 
 def list_project_assets(project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
     rows = db_list("project_assets", project_id=project_id, user_id=user_id, limit=500)
@@ -1921,16 +1963,38 @@ def generate_moodboards_endpoint(project_id: str, payload: MoodboardGenerateInpu
     return {"message": "Moodboards processed", "assets": assets, "jobs": queued_jobs}
 
 @app.post("/projects/{project_id}/renders/generate-separated")
-def generate_separated_renders(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = str(current_user["id"])
-    project = get_project_by_id(project_id, user_id=user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    concept = project.get("selected_concept")
-    if not concept:
-        raise HTTPException(status_code=400, detail="Select a concept first")
-    assets = create_separate_render_view_assets(project, user_id, concept)
-    return {"message": "Separate render views generated", "assets": assets}
+def generate_separated_renders_logic(project_id: str, user_id: str):
+    assets = []
+
+    for view in render_views:
+        title = view["title"]
+        prompt = view["prompt"]
+
+        image_url = generate_render_image(prompt)   # or whatever your code uses
+
+        asset = db_insert(
+            "project_assets",
+            {
+                "project_id": project_id,
+                "user_id": user_id,
+                "asset_type": "3d_render",
+                "section": "renders",
+                "job_kind": "separate_render_view",
+                "title": title,
+                "prompt": prompt,
+                "preview_url": image_url,
+                "master_url": image_url,
+                "source_file_url": image_url,
+                "status": "completed",
+            },
+        )
+
+        assets.append(asset_row_to_dict(asset))
+
+    return {
+        "message": "Separate render views generated",
+        "assets": assets,
+    }
 
 @app.post("/projects/{project_id}/jobs/queue")
 def queue_job_endpoint(project_id: str, payload: JobCreateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
