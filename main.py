@@ -52,6 +52,8 @@ from jose import JWTError, jwt
 from openai import OpenAI
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, field_validator
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException
 
 load_dotenv()
 
@@ -289,14 +291,27 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> Dict[str, Any]:
+
+bearer = HTTPBearer(auto_error=False)
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+) -> Dict[str, Any]:
     if not credentials or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Authorization header required")
-    payload = decode_access_token(credentials.credentials)
-    user_id = payload.get("sub")
-    user = db_get("users", id=user_id)
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+
     return user
 
 
