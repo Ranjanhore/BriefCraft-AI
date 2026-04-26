@@ -2075,7 +2075,14 @@ def run_project(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    text = (payload.text or project.get("brief_text") or "").strip()
+    text = (
+        payload.text
+        or getattr(payload, "brief", None)
+        or project.get("brief_text")
+        or project.get("brief")
+        or ""
+    ).strip()
+
     if not text:
         raise HTTPException(status_code=422, detail="text required")
 
@@ -2113,26 +2120,13 @@ def run_project(
             project["approved_brief"] = approved_brief
             project["status"] = "brief_confirmed"
             project["current_stage"] = "brief_confirmed"
-            },
-        ) or project
-    except Exception as e:
-        print("Auto brief confirm failed, continuing run:", e)
-        project["approved_brief"] = approved_brief
-        project["status"] = "brief_confirmed"
-        project["current_stage"] = "brief_confirmed"
-    return _run_logic(
-        project,
-        text,
-        payload.event_type or project.get("event_type"),
-        user_id,
-    )
-    return _run_logic(
-        project,
-        text,
-        payload.event_type or project.get("event_type"),
-        user_id,
-    )
 
+    return _run_logic(
+        project,
+        text,
+        payload.event_type or project.get("event_type"),
+        user_id,
+    )
 # =============================================================================
 # Compatibility route: frontend expects POST /projects
 # =============================================================================
