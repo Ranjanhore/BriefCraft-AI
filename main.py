@@ -2064,8 +2064,14 @@ def run_pipeline(payload: RunInput, current_user: Dict[str, Any] = Depends(get_c
 
 
 @app.post("/projects/{project_id}/run")
-def run_project(project_id: str, payload: RunProjectInput, current_user: Dict[str, Any] = Depends(get_current_user)):
-    project = get_project_by_id(project_id, str(current_user["id"]))
+def run_project(
+    project_id: str,
+    payload: RunProjectInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+
+    project = get_project_by_id(project_id, user_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -2073,13 +2079,19 @@ def run_project(project_id: str, payload: RunProjectInput, current_user: Dict[st
     if not text:
         raise HTTPException(status_code=422, detail="text required")
 
-        if project.get("status") == "brief_needs_confirmation" and not brief_ready_for_concepts(project):
+    if project.get("status") == "brief_needs_confirmation" and not brief_ready_for_concepts(project):
         raise HTTPException(
             status_code=400,
             detail="Brief must be confirmed before concept generation. Use /projects/{project_id}/brief/confirm.",
         )
 
-    return _run_logic(project, text, payload.event_type or project.get("event_type"), str(current_user["id"]))
+    return _run_logic(
+        project,
+        text,
+        payload.event_type or project.get("event_type"),
+        user_id,
+    )
+    
 
 
 @app.post("/select")
