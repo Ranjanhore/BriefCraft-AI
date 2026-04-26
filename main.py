@@ -2097,7 +2097,97 @@ def run_project(
         payload.event_type or project.get("event_type"),
         user_id,
     )
-    
+
+# =============================================================================
+# Compatibility route: frontend expects POST /projects
+# =============================================================================
+
+@app.get("/projects")
+def list_projects_plural(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = str(current_user["id"])
+
+    rows = db_list(
+        "projects",
+        limit=200,
+        order_key="created_at",
+        desc=True,
+        user_id=user_id,
+    )
+
+    return {
+        "projects": rows,
+        "count": len(rows),
+    }
+
+
+@app.post("/projects")
+async def create_project_plural(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    brief = (
+        payload.get("brief")
+        or payload.get("brief_text")
+        or payload.get("text")
+        or ""
+    ).strip()
+
+    if not brief:
+        raise HTTPException(status_code=422, detail="brief required")
+
+    title = (
+        payload.get("title")
+        or payload.get("name")
+        or payload.get("project_name")
+        or brief[:80]
+        or "New Creative Project"
+    ).strip()
+
+    event_type = (
+        payload.get("event_type")
+        or payload.get("campaign_type")
+        or "event"
+    )
+
+    style_direction = (
+        payload.get("style_direction")
+        or payload.get("style_theme")
+        or "premium creative"
+    )
+
+    row = db_insert(
+        "projects",
+        {
+            "user_id": user_id,
+            "project_name": title,
+            "brief_text": brief,
+            "campaign_type": event_type,
+            "status": "draft",
+            "style_theme": style_direction,
+        },
+    )
+
+    project_id = row.get("id")
+
+    return {
+        **row,
+        "id": project_id,
+        "project_id": project_id,
+        "title": title,
+        "brief": brief,
+        "brief_text": brief,
+        "event_type": event_type,
+        "style_direction": style_direction,
+        "message": "Project created",
+    }
+
 
 @app.post("/select")
 def select_concept(payload: SelectConceptInput, current_user: Dict[str, Any] = Depends(get_current_user)):
