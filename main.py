@@ -97,14 +97,9 @@ ALLOWED_ORIGINS = _split_origins(
     )
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)?(lovable\.(app|dev)|lovableproject\.com)$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,29 +114,6 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/exports", StaticFiles(directory=str(EXPORT_DIR)), name="exports")
 app.mount("/renders", StaticFiles(directory=str(RENDER_OUTPUT_DIR)), name="renders")
-
-try:
-    from supabase import create_client
-    _sb = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-except Exception:
-    _sb = None
-
-_openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-bearer = HTTPBearer(auto_error=False)
-
-_LOCAL: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "users": {},
-    "projects": {},
-    "project_comments": {},
-    "project_assets": {},
-    "agent_jobs": {},
-    "project_activity_logs": {},
-    "voice_sessions": {},
-    "voice_messages": {},
-    "cad_layouts": {},
-    "show_trials": {},
-}
 
 
 # ------------------------------------------------------------------------------
