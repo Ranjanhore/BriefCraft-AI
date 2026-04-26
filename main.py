@@ -1642,23 +1642,29 @@ async def unhandled_exception_handler(_, exc: Exception):
 
 @app.get("/")
 def root():
+    supabase_ok = globals().get("_sb") is not None
+    openai_ok = globals().get("_openai_client") is not None
+
     return {
         "message": f"{APP_NAME} running",
         "version": APP_VERSION,
         "time": now_iso(),
         "docs": "/docs",
-        "openai": bool(_openai_client),
-        "supabase": bool(_sb),
+        "openai": openai_ok,
+        "supabase": supabase_ok,
     }
 
 
 @app.get("/health")
 def health():
+    supabase_ok = globals().get("_sb") is not None
+    openai_ok = globals().get("_openai_client") is not None
+
     return {
         "ok": True,
         "service": "BriefCraft-AI backend",
-        "openai": _openai_client is not None,
-        "supabase": _sb is not None,
+        "openai": openai_ok,
+        "supabase": supabase_ok,
         "supabase_env": bool(SUPABASE_URL and SUPABASE_KEY),
         "storage_bucket": SUPABASE_STORAGE_BUCKET or None,
     }
