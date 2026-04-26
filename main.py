@@ -1727,6 +1727,25 @@ class VoiceChatTextInput(BaseModel):
     title: Optional[str] = None
     system_prompt: Optional[str] = None
 
+class BriefIntakeInput(BaseModel):
+    brief_text: Optional[str] = None
+    apply_all_suggestions: bool = False
+    selected_suggestion_ids: Optional[List[str]] = None
+    user_notes: Optional[str] = None
+
+class BriefConfirmInput(BaseModel):
+    approved_brief: Dict[str, Any]
+    user_note: Optional[str] = None
+    start_concepts: bool = True
+
+class WorkflowNextInput(BaseModel):
+    action: Optional[str] = None
+    auto_generate_moodboard: bool = False
+    auto_generate_2d: bool = False
+    auto_generate_3d: bool = False
+    auto_generate_cad: bool = False
+    auto_build_departments: bool = False
+
 
 # ------------------------------------------------------------------------------
 # Error handler
@@ -1841,6 +1860,129 @@ def me(user: Dict[str, Any] = Depends(get_current_user)):
 # Project routes
 # ------------------------------------------------------------------------------
 
+@app.post("/projects/{project_id}/brief/intake")
+def brief_intake_endpoint(
+    project_id: str,
+    payload: BriefIntakeInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return brief_intake_agent(
+        project=project,
+        user_id=user_id,
+        raw_brief=payload.brief_text,
+        uploaded_sources=[],
+        apply_all_suggestions=payload.apply_all_suggestions,
+        selected_suggestion_ids=payload.selected_suggestion_ids,
+        user_notes=payload.user_notes,
+    )
+
+
+@app.post("/projects/{project_id}/brief/intake-with-files")
+async def brief_intake_with_files_endpoint(
+    project_id: str,
+    brief_text: Optional[str] = Form(default=None),
+    apply_all_suggestions: bool = Form(default=False),
+    user_notes: Optional[str] = Form(default=None),
+    files: List[UploadFile] = File(default=[]),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    uploaded_sources: List[Dict[str, Any]] = []
+
+    for file in files:
+        content = await file.read()
+        if not content:
+            continue
+
+        suffix = Path(file.filename or "upload.bin").suffix or ".bin"
+        saved_path = UPLOAD_DIR / f"brief_source_{uuid.uuid4().hex}{suffix}"
+        saved_path.write_bytes(content)
+
+        extracted = extract_text_from_uploaded_bytes(file.filename or saved_path.name, file.content_type, content)
+        rel = relative_public_url(saved_path)
+        public_url = absolute_public_url(rel)
+
+        asset = create_project_asset(
+            project_id,
+            user_id,
+            asset_type="reference",
+            title=file.filename or "Brief Source",
+            prompt=extracted.get("text", "")[:1000],
+            section="references",
+            job_kind="brief_source_upload",
+            status="completed",
+            preview_url=public_url,
+            master_url=public_url,
+            print_url=public_url,
+            source_file_url=public_url,
+            meta={
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "size_bytes": len(content),
+                "extraction_notes": extracted.get("notes", []),
+                "extracted_text_preview": extracted.get("text", "")[:2000],
+            },
+        )
+
+        uploaded_sources.append(
+            {
+                "asset_id": asset.get("id"),
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "source_file_url": public_url,
+                "extracted_text": extracted.get("text", "")[:12000],
+                "notes": extracted.get("notes", []),
+            }
+        )
+
+    update_project_media_rollups(project_id, user_id)
+
+    return brief_intake_agent(
+        project=project,
+        user_id=user_id,
+        raw_brief=brief_text,
+        uploaded_sources=uploaded_sources,
+        apply_all_suggestions=apply_all_suggestions,
+        selected_suggestion_ids=[],
+        user_notes=user_notes,
+    )
+
+
+@app.post("/projects/{project_id}/brief/confirm")
+def confirm_brief_endpoint(
+    project_id: str,
+    payload: BriefConfirmInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    confirmed = confirm_structured_brief(project_id, user_id, payload.approved_brief, payload.user_note)
+
+    if payload.start_concepts:
+        project = confirmed["project"]
+        run_result = _run_logic(project, project.get("brief_text") or "", project.get("event_type"), user_id)
+        confirmed["concept_generation"] = run_result
+        confirmed["next_step"] = "User should select a final concept"
+
+    return confirmed
+
+
+@app.post("/projects/{project_id}/workflow/next")
+def workflow_next_endpoint(
+    project_id: str,
+    payload: WorkflowNextInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    return workflow_next_logic(project_id, str(current_user["id"]), payload)
+
 @app.get("/projects")
 def list_projects(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {"projects": db_list("projects", user_id=str(current_user["id"]), limit=500)}
@@ -1951,6 +2093,12 @@ def run_project(project_id: str, payload: RunProjectInput, current_user: Dict[st
     if not text:
         raise HTTPException(status_code=422, detail="text required")
 
+        if project.get("status") == "brief_needs_confirmation" and not brief_ready_for_concepts(project):
+        raise HTTPException(
+            status_code=400,
+            detail="Brief must be confirmed before concept generation. Use /projects/{project_id}/brief/confirm.",
+        )
+
     return _run_logic(project, text, payload.event_type or project.get("event_type"), str(current_user["id"]))
 
 
@@ -1990,6 +2138,437 @@ def select_concept_compat(project_id: str, payload: SelectCompatInput, current_u
     if idx is None:
         raise HTTPException(status_code=422, detail="concept_index required")
     return select_concept(SelectConceptInput(project_id=project_id, index=idx), current_user)
+
+
+# ------------------------------------------------------------------------------
+# Brief Intake Agent
+# ------------------------------------------------------------------------------
+
+def extract_text_from_uploaded_bytes(filename: str, content_type: Optional[str], data: bytes) -> Dict[str, Any]:
+    filename = filename or "upload"
+    content_type = content_type or ""
+
+    result = {
+        "filename": filename,
+        "content_type": content_type,
+        "text": "",
+        "notes": [],
+    }
+
+    suffix = Path(filename).suffix.lower()
+
+    try:
+        if suffix in {".txt", ".md", ".csv", ".json"} or content_type.startswith("text/"):
+            result["text"] = data.decode("utf-8", errors="ignore")[:12000]
+            return result
+
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+
+                reader = PdfReader(io.BytesIO(data))
+                pages = []
+                for page in reader.pages[:20]:
+                    pages.append(page.extract_text() or "")
+                result["text"] = "\n".join(pages)[:20000]
+                return result
+            except Exception as e:
+                result["notes"].append(f"PDF text extraction unavailable: {repr(e)}")
+                return result
+
+        if suffix in {".docx"}:
+            try:
+                import docx
+
+                document = docx.Document(io.BytesIO(data))
+                result["text"] = "\n".join([p.text for p in document.paragraphs])[:20000]
+                return result
+            except Exception as e:
+                result["notes"].append(f"DOCX text extraction unavailable: {repr(e)}")
+                return result
+
+        if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            result["notes"].append("Image uploaded. Stored as source reference. Visual extraction can be added later.")
+            return result
+
+        result["notes"].append("Unsupported file type for text extraction. Stored as source reference.")
+        return result
+
+    except Exception as e:
+        result["notes"].append(f"Extraction failed: {repr(e)}")
+        return result
+
+
+def project_source_context(project: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    project_id = str(project["id"])
+    assets = list_project_assets(project_id, user_id)
+
+    references = [
+        {
+            "title": a.get("title"),
+            "asset_type": a.get("asset_type"),
+            "section": a.get("section"),
+            "prompt": a.get("prompt"),
+            "meta": a.get("meta"),
+            "preview_url": a.get("preview_url"),
+            "source_file_url": a.get("source_file_url"),
+        }
+        for a in assets
+        if a.get("asset_type") in {"reference", "moodboard", "2d_graphic", "3d_render"}
+    ]
+
+    return {
+        "project_id": project_id,
+        "project_name": project.get("project_name"),
+        "existing_brief": project.get("brief_text"),
+        "event_type": project.get("event_type"),
+        "style_direction": project.get("style_direction"),
+        "style_theme": project.get("style_theme"),
+        "references": references[:30],
+    }
+
+
+def fallback_structured_brief(project: Dict[str, Any], raw_brief: str, uploaded_sources: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    event_type = infer_event_type(raw_brief or project.get("brief_text") or "", project.get("event_type"))
+
+    return {
+        "brief_title": project.get("project_name") or "Untitled Event Brief",
+        "clean_brief": raw_brief or project.get("brief_text") or "",
+        "event_type": event_type,
+        "objective": "Create a premium event experience based on the provided user brief.",
+        "audience": "Guests, stakeholders, brand team, and production team.",
+        "brand_direction": project.get("style_direction") or project.get("style_theme") or "premium contemporary",
+        "tone_and_style": ["premium", "cinematic", "clear", "production-ready"],
+        "key_requirements": [
+            "Create strong creative concepts",
+            "Prepare moodboard and visual assets",
+            "Prepare 2D graphics and 3D renders",
+            "Prepare CAD layout and department manuals",
+            "Prepare show running flow",
+        ],
+        "known_details": {
+            "project_name": project.get("project_name"),
+            "event_type": event_type,
+            "style_direction": project.get("style_direction"),
+        },
+        "missing_information": [
+            {
+                "id": "venue",
+                "question": "What is the venue name, city, indoor/outdoor condition, and approximate dimensions?",
+                "importance": "high",
+                "default_assumption": "Indoor premium event venue with stage, audience, and LED screen.",
+            },
+            {
+                "id": "audience_count",
+                "question": "What is expected guest/audience count?",
+                "importance": "high",
+                "default_assumption": "Planning for 300–500 guests.",
+            },
+            {
+                "id": "budget",
+                "question": "What is the approximate production budget range?",
+                "importance": "medium",
+                "default_assumption": "Premium but cost-conscious production budget.",
+            },
+            {
+                "id": "brand_assets",
+                "question": "Do you have logo, brand guideline, color palette, or reference images?",
+                "importance": "high",
+                "default_assumption": "Use elegant futuristic AI brand styling until brand assets are uploaded.",
+            },
+            {
+                "id": "timeline",
+                "question": "What is the event date and production timeline?",
+                "importance": "medium",
+                "default_assumption": "Standard pre-production timeline with staged approvals.",
+            },
+        ],
+        "suggested_improvements": [
+            {
+                "id": "add_objective",
+                "title": "Add clear event objective",
+                "reason": "Concepts become stronger when the purpose is clear.",
+                "suggested_text": "The event should launch the AI creative studio as a premium, futuristic, reliable creative technology brand.",
+            },
+            {
+                "id": "add_audience",
+                "title": "Define audience profile",
+                "reason": "Audience profile affects entry, seating, show flow, and visual tone.",
+                "suggested_text": "Primary audience includes brand partners, investors, enterprise clients, creators, and media guests.",
+            },
+            {
+                "id": "add_experience_flow",
+                "title": "Add guest journey",
+                "reason": "A strong event needs arrival, reveal, engagement, and finale moments.",
+                "suggested_text": "Guest journey should include premium entry, immersive brand tunnel, cinematic reveal, AI demo zone, networking lounge, and finale moment.",
+            },
+        ],
+        "recommended_next_questions": [
+            "Do you want a luxury cinematic direction or a futuristic technology direction?",
+            "Should the event feel more premium, emotional, corporate, or experimental?",
+            "Should the design prioritize stage impact, brand storytelling, or guest journey?",
+        ],
+        "sources_used": uploaded_sources or [],
+        "approval_status": "needs_user_confirmation",
+    }
+
+
+def brief_intake_agent(
+    project: Dict[str, Any],
+    user_id: str,
+    raw_brief: Optional[str],
+    uploaded_sources: Optional[List[Dict[str, Any]]] = None,
+    apply_all_suggestions: bool = False,
+    selected_suggestion_ids: Optional[List[str]] = None,
+    user_notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_brief = (raw_brief or project.get("brief_text") or "").strip()
+    if not raw_brief and not uploaded_sources:
+        raise HTTPException(status_code=422, detail="brief_text or upload source required")
+
+    source_context = project_source_context(project, user_id)
+    source_context["uploaded_sources"] = uploaded_sources or []
+
+    fallback = fallback_structured_brief(project, raw_brief, uploaded_sources)
+
+    system = """
+You are BriefCraft-AI's Brief Intake Agent.
+
+Your job:
+1. Convert messy user text and upload context into a complete professional event brief.
+2. Keep user intent intact.
+3. Extract structured project information.
+4. Detect missing information.
+5. If missing, create practical assumptions.
+6. Suggest brief improvements.
+7. Give options the user can approve.
+8. Do not start concept generation. Only prepare the brief for user confirmation.
+
+Return JSON only with:
+brief_title,
+clean_brief,
+event_type,
+objective,
+audience,
+brand_direction,
+tone_and_style,
+key_requirements,
+known_details,
+missing_information,
+suggested_improvements,
+recommended_next_questions,
+sources_used,
+ready_for_concepts,
+approval_status.
+"""
+
+    prompt = f"""
+PROJECT CONTEXT:
+{dump_json(source_context)}
+
+RAW USER BRIEF:
+{raw_brief}
+
+USER NOTES:
+{user_notes or ""}
+
+APPLY ALL SUGGESTIONS:
+{apply_all_suggestions}
+
+SELECTED SUGGESTION IDS:
+{selected_suggestion_ids or []}
+
+Create a polished, structured, complete event brief.
+If information is missing, use clear assumptions but mark them as assumptions.
+Do not invent exact venue, budget, date, brand logo, or legal facts unless provided.
+"""
+
+    structured = llm_json(system, prompt, fallback)
+
+    if not isinstance(structured, dict):
+        structured = fallback
+
+    structured.setdefault("approval_status", "needs_user_confirmation")
+    structured.setdefault("ready_for_concepts", False)
+    structured.setdefault("sources_used", uploaded_sources or [])
+
+    job = db_insert(
+        "agent_jobs",
+        {
+            "project_id": str(project["id"]),
+            "user_id": user_id,
+            "agent_type": "brief_intake_agent",
+            "job_type": "brief_structuring",
+            "title": "Brief Intake Agent",
+            "status": "completed",
+            "input_data": {
+                "raw_brief": raw_brief,
+                "uploaded_sources": uploaded_sources or [],
+                "apply_all_suggestions": apply_all_suggestions,
+                "selected_suggestion_ids": selected_suggestion_ids or [],
+                "user_notes": user_notes,
+            },
+            "output_data": structured,
+        },
+    )
+
+    updated_analysis = project.get("analysis") or {}
+    if not isinstance(updated_analysis, dict):
+        updated_analysis = load_json(updated_analysis, {}) or {}
+
+    updated_analysis["brief_intake_agent"] = structured
+
+    updated = db_update(
+        "projects",
+        str(project["id"]),
+        {
+            "brief_text": structured.get("clean_brief") or raw_brief,
+            "analysis": updated_analysis,
+            "status": "brief_needs_confirmation",
+        },
+    )
+
+    add_project_activity(
+        str(project["id"]),
+        user_id,
+        "brief.intake.completed",
+        "Brief Intake Agent completed",
+        detail="Structured brief prepared and waiting for user confirmation",
+        meta={"job_id": job["id"], "approval_status": structured.get("approval_status")},
+    )
+
+    return {
+        "message": "Structured brief prepared",
+        "project": updated,
+        "structured_brief": structured,
+        "job": job_row_to_dict(job),
+        "requires_confirmation": True,
+        "next_step": "User should review, edit, and confirm the brief before concept generation.",
+    }
+
+
+def brief_ready_for_concepts(project: Dict[str, Any]) -> bool:
+    analysis = project.get("analysis") or {}
+    if not isinstance(analysis, dict):
+        analysis = load_json(analysis, {}) or {}
+
+    intake = analysis.get("brief_intake_agent") or {}
+    return intake.get("approval_status") == "confirmed"
+
+
+def confirm_structured_brief(
+    project_id: str,
+    user_id: str,
+    approved_brief: Dict[str, Any],
+    user_note: Optional[str] = None,
+) -> Dict[str, Any]:
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not isinstance(approved_brief, dict):
+        raise HTTPException(status_code=422, detail="approved_brief must be an object")
+
+    approved_brief["approval_status"] = "confirmed"
+    approved_brief["confirmed_at"] = now_iso()
+    if user_note:
+        approved_brief["confirmation_note"] = user_note
+
+    analysis = project.get("analysis") or {}
+    if not isinstance(analysis, dict):
+        analysis = load_json(analysis, {}) or {}
+
+    analysis["brief_intake_agent"] = approved_brief
+
+    clean_brief = approved_brief.get("clean_brief") or project.get("brief_text") or ""
+    event_type = approved_brief.get("event_type") or project.get("event_type")
+
+    updated = db_update(
+        "projects",
+        project_id,
+        {
+            "brief_text": clean_brief,
+            "event_type": event_type,
+            "analysis": analysis,
+            "status": "brief_confirmed",
+        },
+    )
+
+    add_project_activity(
+        project_id,
+        user_id,
+        "brief.confirmed",
+        "Brief confirmed",
+        detail="User confirmed structured brief. Concept generation can start.",
+    )
+
+    return {
+        "message": "Brief confirmed",
+        "project": updated,
+        "structured_brief": approved_brief,
+        "next_step": "Generate concepts",
+    }
+
+
+def workflow_next_logic(project_id: str, user_id: str, payload: WorkflowNextInput) -> Dict[str, Any]:
+    project = get_project_by_id(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    status = project.get("status") or "draft"
+
+    if status in {"draft", "brief_needs_confirmation"} and not brief_ready_for_concepts(project):
+        return {
+            "message": "Brief confirmation required before concept generation",
+            "status": status,
+            "required_action": "confirm_brief",
+            "endpoint": f"/projects/{project_id}/brief/confirm",
+        }
+
+    if status in {"brief_confirmed", "draft"} or not project.get("concepts"):
+        result = _run_logic(project, project.get("brief_text") or "", project.get("event_type"), user_id)
+        return {
+            "message": "Concept generation completed",
+            "stage": "concepts",
+            "result": result,
+            "next_step": "User should select final concept",
+        }
+
+    if project.get("concepts") and not project.get("selected_concept"):
+        return {
+            "message": "Concepts are ready. User must select a final concept.",
+            "stage": "concept_selection",
+            "concepts": project.get("concepts"),
+            "endpoint": f"/projects/{project_id}/select-concept",
+        }
+
+    if project.get("selected_concept") and payload.auto_build_departments:
+        departments = build_departments_logic(project_id, user_id)
+        return {
+            "message": "Departments generated",
+            "stage": "departments",
+            "departments": departments,
+        }
+
+    if project.get("selected_concept"):
+        return {
+            "message": "Final concept selected. Downstream generation is available.",
+            "stage": "downstream_ready",
+            "available_actions": [
+                "Generate moodboard",
+                "Generate 2D graphics",
+                "Generate 3D renders",
+                "Generate CAD layout",
+                "Build departments",
+                "Generate manuals",
+                "Run show console",
+            ],
+        }
+
+    return {
+        "message": "No workflow action performed",
+        "status": status,
+    }
 
 
 # ------------------------------------------------------------------------------
