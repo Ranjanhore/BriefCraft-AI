@@ -2080,27 +2080,39 @@ def run_project(
         raise HTTPException(status_code=422, detail="text required")
 
     if project.get("status") == "brief_needs_confirmation" and not brief_ready_for_concepts(project):
-    approved_brief = (
-        project.get("approved_brief")
-        or project.get("structured_brief")
-        or project.get("brief_intake")
-        or project.get("analysis")
-        or {
-            "summary": text,
-            "event_type": payload.event_type or project.get("event_type") or project.get("campaign_type") or "event",
-            "style_direction": project.get("style_direction") or project.get("style_theme") or "premium creative",
-            "ready_for_concepts": True,
-        }
-    )
+        approved_brief = (
+            project.get("approved_brief")
+            or project.get("structured_brief")
+            or project.get("brief_intake")
+            or project.get("analysis")
+            or {
+                "summary": text,
+                "event_type": payload.event_type
+                or project.get("event_type")
+                or project.get("campaign_type")
+                or "event",
+                "style_direction": project.get("style_direction")
+                or project.get("style_theme")
+                or "premium creative",
+                "ready_for_concepts": True,
+            }
+        )
 
-    try:
-        project = db_update(
-            "projects",
-            project_id,
-            {
-                "approved_brief": approved_brief,
-                "status": "brief_confirmed",
-                "current_stage": "brief_confirmed",
+        try:
+            project = db_update(
+                "projects",
+                project_id,
+                {
+                    "approved_brief": approved_brief,
+                    "status": "brief_confirmed",
+                    "current_stage": "brief_confirmed",
+                },
+            ) or project
+        except Exception as e:
+            print("Auto brief confirm failed, continuing run:", e)
+            project["approved_brief"] = approved_brief
+            project["status"] = "brief_confirmed"
+            project["current_stage"] = "brief_confirmed"
             },
         ) or project
     except Exception as e:
