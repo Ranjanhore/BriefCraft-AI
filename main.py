@@ -46,6 +46,10 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 try:
     from supabase import create_client
+    try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 except Exception:
     create_client = None
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +59,10 @@ from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from openai import OpenAI
 from passlib.context import CryptContext
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 from pydantic import BaseModel, Field, field_validator
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends, HTTPException
@@ -111,6 +119,7 @@ if SUPABASE_URL and SUPABASE_KEY and create_client:
     except Exception:
         _sb = None
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 BASE_DIR = Path(__file__).resolve().parent
