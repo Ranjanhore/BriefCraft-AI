@@ -1964,45 +1964,25 @@ def confirm_brief_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     user_id = str(current_user["id"])
-    confirmed = confirm_structured_brief(project_id, user_id, payload.approved_brief, payload.user_note)
+    confirmed = confirm_structured_brief(
+        project_id,
+        user_id,
+        payload.approved_brief,
+        payload.user_note,
+    )
 
     if payload.start_concepts:
         project = confirmed["project"]
-        run_result = _run_logic(project, project.get("brief_text") or "", project.get("event_type"), user_id)
+        run_result = _run_logic(
+            project,
+            project.get("brief_text") or "",
+            project.get("event_type"),
+            user_id,
+        )
         confirmed["concept_generation"] = run_result
         confirmed["next_step"] = "User should select a final concept"
 
     return confirmed
-
-
-@app.post("/projects/{project_id}/workflow/next")
-def workflow_next_endpoint(
-    project_id: str,
-    payload: WorkflowNextInput,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-):
-    return workflow_next_logic(project_id, str(current_user["id"]), payload)
-
-@app.get("/projects")
-def list_projects(current_user: Dict[str, Any] = Depends(get_current_user)):
-    return {"projects": db_list("projects", user_id=str(current_user["id"]), limit=500)}
-
-
-@app.post("/projects")
-def create_project(payload: ProjectCreateInput, current_user: Dict[str, Any] = Depends(get_current_user)):
-    return db_insert(
-        "projects",
-        {
-            "user_id": str(current_user["id"]),
-            "project_name": (payload.title or payload.name or "Untitled").strip(),
-            "brief_text": payload.brief,
-            "event_type": payload.event_type,
-            "style_direction": payload.style_direction,
-            "style_theme": payload.style_theme or "luxury",
-            "status": "draft",
-            "visual_policy": merged_visual_policy({}),
-        },
-    )
 
 
 @app.get("/projects/{project_id}")
