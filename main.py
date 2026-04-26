@@ -97,7 +97,6 @@ ALLOWED_ORIGINS = _split_origins(
     )
 )
 
-app = FastAPI(title=APP_NAME, version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
