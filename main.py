@@ -309,6 +309,9 @@ def db_update(table: str, row_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
 # Auth helpers
 # ------------------------------------------------------------------------------
 
+def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+    return db_get("users", id=user_id)    
+    
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -1482,7 +1485,8 @@ def health():
         "ok": True,
         "service": "BriefCraft-AI backend",
         "openai": _openai_client is not None,
-        "supabase": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
+        "supabase": _sb is not None,
+        "supabase_env": bool(SUPABASE_URL and SUPABASE_KEY),
         "storage_bucket": SUPABASE_STORAGE_BUCKET or None,
     }
 
