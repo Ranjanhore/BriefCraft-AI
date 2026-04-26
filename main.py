@@ -44,6 +44,10 @@ if __name__ == "__main__":
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -93,6 +97,21 @@ PORT = int(os.getenv("PORT", "10000"))
 ALGORITHM = "HS256"
 TOKEN_HOURS = int(os.getenv("TOKEN_HOURS", "72"))
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# ------------------------------------------------------------------------------
+# Supabase / local fallback / password hashing
+# ------------------------------------------------------------------------------
+
+_LOCAL: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+_sb = None
+if SUPABASE_URL and SUPABASE_KEY and create_client:
+    try:
+        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        _sb = None
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 BASE_DIR = Path(__file__).resolve().parent
 EXPORT_DIR = (BASE_DIR / "exports").resolve()
