@@ -57,10 +57,6 @@ from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from openai import OpenAI
 from passlib.context import CryptContext
-try:
-    from supabase import create_client
-except Exception:
-    create_client = None
 from pydantic import BaseModel, Field, field_validator
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends, HTTPException
