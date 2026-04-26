@@ -1,46 +1,14 @@
-
 from __future__ import annotations
 
 import base64
 import io
 import json
 import os
-from datetime import datetime, timedelta, timezone
-from jose import jwt
-from openai import OpenAI
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render")
-ALGORITHM = "HS256"
-TOKEN_HOURS = int(os.getenv("ACCESS_TOKEN_HOURS", "72"))
-
-def create_access_token(user_id: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
-    payload = {
-        "sub": user_id,
-        "exp": expire,
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timedelta, timezone
-from jose import jwt
-
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render")
-ALGORITHM = "HS256"
-TOKEN_HOURS = 72
-
-def create_access_token(user_id: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
-    payload = {
-        "sub": user_id,
-        "exp": expire,
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-if __name__ == "__main__":
-    user_id = "693d347e-b791-4dfe-b275-b5fff2de3df7"
-    print(create_access_token(user_id))
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -58,8 +26,6 @@ from jose import JWTError, jwt
 from openai import OpenAI
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, field_validator
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import Depends, HTTPException
 
 load_dotenv()
 
@@ -99,16 +65,6 @@ PORT = int(os.getenv("PORT", "10000"))
 ALGORITHM = "HS256"
 TOKEN_HOURS = int(os.getenv("TOKEN_HOURS", "72"))
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_LOCAL: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-_sb = None
-if SUPABASE_URL and SUPABASE_KEY and create_client:
-    try:
-        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
-        _sb = None
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ------------------------------------------------------------------------------
 # Supabase / local fallback / password hashing
@@ -660,31 +616,6 @@ def build_scene_json(project: Dict[str, Any]) -> Dict[str, Any]:
 # Assets / jobs / activity helpers
 # ------------------------------------------------------------------------------
 
-def asset_row_to_dict(row):
-    if not row:
-        return {}
-
-    item = dict(row)
-
-    return {
-        "id": item.get("id"),
-        "project_id": item.get("project_id"),
-        "user_id": item.get("user_id"),
-        "asset_type": item.get("asset_type"),
-        "section": item.get("section"),
-        "job_kind": item.get("job_kind"),
-        "title": item.get("title"),
-        "prompt": item.get("prompt"),
-        "status": item.get("status"),
-        "preview_url": item.get("preview_url"),
-        "master_url": item.get("master_url"),
-        "print_url": item.get("print_url"),
-        "source_file_url": item.get("source_file_url"),
-        "meta": load_json(item.get("meta")),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-    }
-
 def job_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     item = dict(row)
     item["input_data"] = load_json(item.get("input_data"), {})
@@ -789,32 +720,7 @@ def create_project_asset(
     )
     return asset_row_to_dict(row)
 
-def asset_row_to_dict(row):
-    if not row:
-        return {}
-
-    item = dict(row)
-
-    return {
-        "id": item.get("id"),
-        "project_id": item.get("project_id"),
-        "user_id": item.get("user_id"),
-        "asset_type": item.get("asset_type"),
-        "section": item.get("section"),
-        "job_kind": item.get("job_kind"),
-        "title": item.get("title"),
-        "prompt": item.get("prompt"),
-        "status": item.get("status"),
-        "preview_url": item.get("preview_url"),
-        "master_url": item.get("master_url"),
-        "print_url": item.get("print_url"),
-        "source_file_url": item.get("source_file_url"),
-        "meta": load_json(item.get("meta")),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-    }
-
-
+   
 def list_project_assets(project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
     SECTION_NORMALIZER = {
         "moodboards": "moodboard",
@@ -849,6 +755,7 @@ def list_project_assets(project_id: str, user_id: str, section: Optional[str] = 
     )
 
     return [asset_row_to_dict(row) for row in rows]
+    
 def queue_agent_job_with_activity(
     project_id: str,
     user_id: str,
@@ -1191,22 +1098,6 @@ def generate_voice_reply(current_user: Dict[str, Any], session: Dict[str, Any], 
 # ------------------------------------------------------------------------------
 # Pydantic models
 # ------------------------------------------------------------------------------
-
-@field_validator("password")
-@classmethod
-def validate_password_length(cls, value: str) -> str:
-    if len(value.encode("utf-8")) > 72:
-        raise ValueError("Password must be 72 bytes or less")
-    return value
-
-
-  def validate_email(cls, value: str) -> str:
-        email = value.strip().lower()
-        if not EMAIL_RE.match(email):
-            raise ValueError("Invalid email address")
-        return email
-
-   
 
 class SignupIn(BaseModel):
     email: str
@@ -1774,15 +1665,7 @@ def log_console_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str,
     return state
 
 
-def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
-    project = get_project_by_id(project_id, user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    if not project.get("selected_concept"):
-        raise HTTPException(status_code=400, detail="Select a concept first")
-
-    sound_data = default_sound_plan(project)
+   sound_data = default_sound_plan(project)
     lighting_data = default_lighting_plan(project)
     showrunner_data = default_showrunner_plan(project)
 
@@ -1826,43 +1709,7 @@ def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
     }
 
 
-def build_departments_logic(project_id: str, user_id: str) -> Dict[str, Any]:
-    project = get_project_by_id(project_id, user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not project.get("selected_concept"):
-        raise HTTPException(status_code=400, detail="Select a concept first")
 
-    sound_data = default_sound_plan(project)
-    lighting_data = default_lighting_plan(project)
-    showrunner_data = default_showrunner_plan(project)
-    state = console_state(project)
-    state.update({"sound_ready": True, "lighting_ready": True, "showrunner_ready": True, "console_index": 0, "hold": False})
-    updated = db_update(
-        "projects",
-        project_id,
-        {
-            "sound_data": sound_data,
-            "lighting_data": lighting_data,
-            "showrunner_data": showrunner_data,
-            "department_outputs": state,
-            "scene_json": build_scene_json(project),
-            "status": "departments_ready",
-        },
-    )
-    add_project_activity(project_id, user_id, "departments.generated", "Departments generated", detail="Sound, lighting, showrunner ready")
-    return {
-        "message": "Departments generated",
-        "project_id": project_id,
-        "sound_data": sound_data,
-        "lighting_data": lighting_data,
-        "showrunner_data": showrunner_data,
-        "project": updated,
-    }
-
-@app.post("/project/{project_id}/departments/build")
-@app.post("/projects/{project_id}/generate-departments")
-def build_departments(project_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     return build_departments_logic(project_id, str(current_user["id"]))
 
 @app.get("/project/{project_id}/departments/manuals")
