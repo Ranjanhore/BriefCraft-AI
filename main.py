@@ -7,7 +7,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from jose import jwt
-
+from openai import OpenAI
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-render")
 ALGORITHM = "HS256"
 TOKEN_HOURS = int(os.getenv("ACCESS_TOKEN_HOURS", "72"))
@@ -61,6 +61,8 @@ APP_NAME = os.getenv("APP_TITLE", "AICreative Studio API").strip() or "AICreativ
 APP_VERSION = "4.2.0"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+_openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")).strip()
 SECRET_KEY = (os.getenv("JWT_SECRET") or os.getenv("SECRET_KEY", "change-me-32char-secret-key-xx")).strip()
