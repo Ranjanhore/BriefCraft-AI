@@ -2091,8 +2091,13 @@ def run_project(
         payload.event_type or project.get("event_type"),
         user_id,
     )
+    return _run_logic(
+        project,
+        text,
+        payload.event_type or project.get("event_type"),
+        user_id,
+    )
     
-
 
 @app.post("/select")
 def select_concept(payload: SelectConceptInput, current_user: Dict[str, Any] = Depends(get_current_user)):
