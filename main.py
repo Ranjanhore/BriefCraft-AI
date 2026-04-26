@@ -93,8 +93,17 @@ def _split_origins(value: str) -> list[str]:
 ALLOWED_ORIGINS = _split_origins(
     os.getenv(
         "ALLOWED_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://briefly-sparkle.lovable.app",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://briefly-sparkle.lovable.app,https://81db4809-ba40-464a-bd03-42e7f872691c.lovableproject.com",
     )
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)?(lovable\.(app|dev)|lovableproject\.com)$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.add_middleware(
@@ -1231,6 +1240,84 @@ class OrchestrateInput(BaseModel):
     queue_video: bool = True
     queue_cad: bool = True
     queue_manuals: bool = True
+
+class GraphicsGenerateInput(BaseModel):
+    concept_index: Optional[int] = 0
+    count: int = Field(default=3, ge=1, le=6)
+    generate_now: bool = True
+    feedback: Optional[str] = None
+
+@app.post("/projects/{project_id}/graphics/generate")
+def generate_2d_graphics_endpoint(
+    project_id: str,
+    payload: GraphicsGenerateInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    concepts = project.get("concepts") or []
+    if not concepts:
+        raise HTTPException(status_code=400, detail="Run pipeline first to generate concepts")
+
+    idx = payload.concept_index or 0
+    if idx >= len(concepts):
+        raise HTTPException(status_code=400, detail="Invalid concept index")
+
+    concept = concepts[idx]
+    concept_name = concept.get("name") or "Concept"
+    feedback = (payload.feedback or "").strip()
+
+    prompts = []
+    for i in range(1, payload.count + 1):
+        prompts.append(
+            f"Create a premium 2D event graphic for project {project.get('project_name') or project.get('name') or 'Project'}, "
+            f"concept {concept_name}. {concept.get('summary') or ''} "
+            f"{'Feedback: ' + feedback if feedback else ''} "
+            "Luxury event branding, typography, signage, key visual, high-end presentation style."
+        )
+
+    assets: List[Dict[str, Any]] = []
+    for i, prompt in enumerate(prompts, start=1):
+        title = f"{concept_name} 2D Graphic {i}"
+        if payload.generate_now:
+            asset = sync_create_visual_asset(
+                project,
+                user_id,
+                asset_type="2d_graphic",
+                title=title,
+                prompt=prompt,
+                section="2d_graphics",
+                job_kind="concept_2d_graphic",
+            )
+            assets.append(asset)
+        else:
+            asset = create_project_asset(
+                project_id,
+                user_id,
+                asset_type="2d_graphic",
+                title=title,
+                prompt=prompt,
+                section="2d_graphics",
+                job_kind="concept_2d_graphic",
+                status="queued",
+                meta={"queued_only": True},
+            )
+            assets.append(asset)
+
+    update_project_media_rollups(project_id, user_id)
+    add_project_activity(
+        project_id,
+        user_id,
+        "graphics.generated",
+        "2D graphics generated",
+        detail=f"{len(assets)} 2D graphics created",
+        meta={"concept_name": concept_name},
+    )
+
+    return {"message": "2D graphics generated", "assets": assets}
 
 class VisualPolicyInput(BaseModel):
     preview_size: Optional[str] = None
