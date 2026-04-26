@@ -61,7 +61,21 @@ APP_NAME = os.getenv("APP_TITLE", "AICreative Studio API").strip() or "AICreativ
 APP_VERSION = "4.2.0"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-_openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI else None
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    or os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    or os.getenv("SUPABASE_KEY", "").strip()
+)
+
+SUPABASE_STORAGE_BUCKET = (
+    os.getenv("SUPABASE_STORAGE_BUCKET", "").strip()
+    or os.getenv("STORAGE_BUCKET", "").strip()
+    or "briefcraft-assets"
+)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")).strip()
