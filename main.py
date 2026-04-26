@@ -1378,12 +1378,11 @@ def root():
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "time": now_iso(),
-        "openai": bool(_openai_client),
-        "supabase": bool(_sb),
-        "port": PORT,
-        "cors_origins": ALLOWED_ORIGINS,
+        "ok": True,
+        "service": "BriefCraft-AI backend",
+        "openai": _openai_client is not None,
+        "supabase": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
+        "storage_bucket": SUPABASE_STORAGE_BUCKET or None,
     }
 
 @app.post("/signup")
