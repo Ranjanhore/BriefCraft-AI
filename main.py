@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -493,22 +494,76 @@ def transcribe_audio_file(path: Path) -> str:
     return getattr(result, "text", "") or ""
 
 
-def generate_image_data_url(prompt: str, size: str = "1536x1024", quality: str = "high") -> Optional[str]:
+def create_local_placeholder_image(prompt: str, size: str = "1024x1024") -> str:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        width, height = parse_size(size, (1024, 1024))
+        width = min(max(width, 512), 1536)
+        height = min(max(height, 512), 1536)
+
+        img = Image.new("RGB", (width, height), (18, 18, 26))
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
+            font_body = ImageFont.truetype("DejaVuSans.ttf", 24)
+        except Exception:
+            font_title = ImageFont.load_default()
+            font_body = ImageFont.load_default()
+
+        draw.rectangle([40, 40, width - 40, height - 40], outline=(180, 160, 110), width=4)
+        draw.text((70, 70), "BriefCraft AI Visual", fill=(245, 230, 190), font=font_title)
+
+        wrapped = []
+        words = (prompt or "Generated event visual").split()
+        line = ""
+        for word in words:
+            test = f"{line} {word}".strip()
+            if len(test) > 48:
+                wrapped.append(line)
+                line = word
+            else:
+                line = test
+        if line:
+            wrapped.append(line)
+
+        y = 150
+        for line in wrapped[:12]:
+            draw.text((70, y), line, fill=(235, 235, 240), font=font_body)
+            y += 38
+
+        draw.text((70, height - 110), "Fallback preview generated because OpenAI image call failed.", fill=(190, 190, 200), font=font_body)
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+
+    except Exception as e:
+        print("Local placeholder image failed:", repr(e))
+        tiny_png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+            "AAAADUlEQVR42mP8z8BQDwAFgwJ/lJ2Y5wAAAABJRU5ErkJggg=="
+        )
+        return f"data:image/png;base64,{tiny_png}"
+
+
+def generate_image_data_url(prompt: str, size: str = "1024x1024", quality: str = "high") -> Optional[str]:
     if not _openai_client:
         print("Image generation failed: OpenAI client not configured")
-        return None
+        return create_local_placeholder_image(prompt, size)
 
     requested_model = IMAGE_MODEL or "dall-e-3"
 
-    # Safe fallback sizes
-    if requested_model == "dall-e-3":
-        safe_size = size if size in {"1024x1024", "1792x1024", "1024x1792"} else "1024x1024"
-        safe_quality = "hd" if quality in {"high", "hd"} else "standard"
-    else:
-        safe_size = size or "1024x1024"
-        safe_quality = quality or "high"
-
     try:
+        if requested_model == "dall-e-3":
+            safe_size = size if size in {"1024x1024", "1792x1024", "1024x1792"} else "1024x1024"
+            safe_quality = "hd" if quality in {"high", "hd"} else "standard"
+        else:
+            safe_size = size if size else "1024x1024"
+            safe_quality = quality or "high"
+
         response = _openai_client.images.generate(
             model=requested_model,
             prompt=prompt,
@@ -528,23 +583,22 @@ def generate_image_data_url(prompt: str, size: str = "1536x1024", quality: str =
             return url
 
         print("Image generation failed: no b64_json or url returned")
-        return None
+        return create_local_placeholder_image(prompt, size)
 
     except Exception as e:
         print("Image generation failed full error:", repr(e))
 
-        # Fallback to DALL-E 3 if primary model fails
         try:
-            fallback_size = "1024x1024"
             fallback_response = _openai_client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
-                size=fallback_size,
+                size="1024x1024",
                 quality="standard",
                 n=1,
             )
 
             first = fallback_response.data[0]
+
             b64 = getattr(first, "b64_json", None)
             if b64:
                 return f"data:image/png;base64,{b64}"
@@ -554,11 +608,11 @@ def generate_image_data_url(prompt: str, size: str = "1536x1024", quality: str =
                 return url
 
             print("Fallback image generation failed: no image returned")
-            return None
+            return create_local_placeholder_image(prompt, size)
 
         except Exception as fallback_error:
             print("Fallback image generation failed full error:", repr(fallback_error))
-            return None
+            return create_local_placeholder_image(prompt, size)
 
 
 def persist_data_url_image(data_url: str, target_dir: Path, prefix: str) -> Tuple[str, str]:
