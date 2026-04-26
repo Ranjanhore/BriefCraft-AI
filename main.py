@@ -495,21 +495,70 @@ def transcribe_audio_file(path: Path) -> str:
 
 def generate_image_data_url(prompt: str, size: str = "1536x1024", quality: str = "high") -> Optional[str]:
     if not _openai_client:
+        print("Image generation failed: OpenAI client not configured")
         return None
+
+    requested_model = IMAGE_MODEL or "dall-e-3"
+
+    # Safe fallback sizes
+    if requested_model == "dall-e-3":
+        safe_size = size if size in {"1024x1024", "1792x1024", "1024x1792"} else "1024x1024"
+        safe_quality = "hd" if quality in {"high", "hd"} else "standard"
+    else:
+        safe_size = size or "1024x1024"
+        safe_quality = quality or "high"
+
     try:
         response = _openai_client.images.generate(
-            model=IMAGE_MODEL,
+            model=requested_model,
             prompt=prompt,
-            size=size,
-            quality=quality,
+            size=safe_size,
+            quality=safe_quality,
+            n=1,
         )
-        b64 = getattr(response.data[0], "b64_json", None)
+
+        first = response.data[0]
+
+        b64 = getattr(first, "b64_json", None)
         if b64:
             return f"data:image/png;base64,{b64}"
-        return getattr(response.data[0], "url", None)
-    except Exception as e:
-        print("Image generation failed:", e)
+
+        url = getattr(first, "url", None)
+        if url:
+            return url
+
+        print("Image generation failed: no b64_json or url returned")
         return None
+
+    except Exception as e:
+        print("Image generation failed full error:", repr(e))
+
+        # Fallback to DALL-E 3 if primary model fails
+        try:
+            fallback_size = "1024x1024"
+            fallback_response = _openai_client.images.generate(
+                model="dall-e-3",
+                prompt=prompt,
+                size=fallback_size,
+                quality="standard",
+                n=1,
+            )
+
+            first = fallback_response.data[0]
+            b64 = getattr(first, "b64_json", None)
+            if b64:
+                return f"data:image/png;base64,{b64}"
+
+            url = getattr(first, "url", None)
+            if url:
+                return url
+
+            print("Fallback image generation failed: no image returned")
+            return None
+
+        except Exception as fallback_error:
+            print("Fallback image generation failed full error:", repr(fallback_error))
+            return None
 
 
 def persist_data_url_image(data_url: str, target_dir: Path, prefix: str) -> Tuple[str, str]:
