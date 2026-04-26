@@ -99,10 +99,21 @@ PORT = int(os.getenv("PORT", "10000"))
 ALGORITHM = "HS256"
 TOKEN_HOURS = int(os.getenv("TOKEN_HOURS", "72"))
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_LOCAL: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+_sb = None
+if SUPABASE_URL and SUPABASE_KEY and create_client:
+    try:
+        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        _sb = None
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ------------------------------------------------------------------------------
 # Supabase / local fallback / password hashing
 # ------------------------------------------------------------------------------
+
 
 _LOCAL: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -739,6 +750,25 @@ def create_project_asset(
     source_file_url: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    SECTION_NORMALIZER = {
+        "moodboards": "moodboard",
+        "mood_board": "moodboard",
+        "mood-boards": "moodboard",
+
+        "graphics_2d": "2d_graphics",
+        "2d": "2d_graphics",
+        "2d_graphic": "2d_graphics",
+        "2d-graphics": "2d_graphics",
+
+        "renders_3d": "renders",
+        "3d": "renders",
+        "3d_renders": "renders",
+        "render": "renders",
+    }
+
+    normalized_section = SECTION_NORMALIZER.get(section or "general", section or "general")
+
+    
     row = db_insert(
         "project_assets",
         {
@@ -747,7 +777,7 @@ def create_project_asset(
             "asset_type": asset_type,
             "title": title,
             "prompt": prompt,
-            "section": section or "general",
+           "section": normalized_section,
             "job_kind": job_kind or "asset_generation",
             "status": status,
             "preview_url": preview_url,
@@ -785,27 +815,40 @@ def asset_row_to_dict(row):
     }
 
 
-def list_project_assets(cur, project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
-    if section:
-        cur.execute(
-            """
-            select * from public.project_assets
-            where project_id = %s and user_id = %s and section = %s
-            order by created_at desc
-            """,
-            (project_id, user_id, section),
-        )
-    else:
-        cur.execute(
-            """
-            select * from public.project_assets
-            where project_id = %s and user_id = %s
-            order by created_at desc
-            """,
-            (project_id, user_id),
-        )
-    return [asset_row_to_dict(r) for r in cur.fetchall()]
+def list_project_assets(project_id: str, user_id: str, section: Optional[str] = None) -> List[Dict[str, Any]]:
+    SECTION_NORMALIZER = {
+        "moodboards": "moodboard",
+        "mood_board": "moodboard",
+        "mood-boards": "moodboard",
 
+        "graphics_2d": "2d_graphics",
+        "2d": "2d_graphics",
+        "2d_graphic": "2d_graphics",
+        "2d-graphics": "2d_graphics",
+
+        "renders_3d": "renders",
+        "3d": "renders",
+        "3d_renders": "renders",
+        "render": "renders",
+    }
+
+    filters: Dict[str, Any] = {
+        "project_id": project_id,
+        "user_id": user_id,
+    }
+
+    if section:
+        filters["section"] = SECTION_NORMALIZER.get(section, section)
+
+    rows = db_list(
+        "project_assets",
+        limit=500,
+        order_key="created_at",
+        desc=True,
+        **filters,
+    )
+
+    return [asset_row_to_dict(row) for row in rows]
 def queue_agent_job_with_activity(
     project_id: str,
     user_id: str,
@@ -1156,13 +1199,14 @@ def validate_password_length(cls, value: str) -> str:
         raise ValueError("Password must be 72 bytes or less")
     return value
 
-    @field_validator("email")
-    @classmethod
-    def validate_email(cls, value: str) -> str:
+
+  def validate_email(cls, value: str) -> str:
         email = value.strip().lower()
         if not EMAIL_RE.match(email):
             raise ValueError("Invalid email address")
         return email
+
+   
 
 class SignupIn(BaseModel):
     email: str
