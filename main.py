@@ -1322,6 +1322,74 @@ def generate_2d_graphics_endpoint(
 
     return {"message": "2D graphics generated", "assets": assets}
 
+class Generate2DCompatInput(BaseModel):
+    project_id: str
+    concept_id: Optional[str] = None
+    concept_index: Optional[int] = 0
+    prompt: Optional[str] = None
+    format: Optional[str] = "poster"
+    size: Optional[str] = "1536x1024"
+    count: int = Field(default=1, ge=1, le=6)
+    feedback: Optional[str] = None
+
+
+@app.post("/ai/generate-2d")
+def ai_generate_2d_compat(
+    payload: Generate2DCompatInput,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = str(current_user["id"])
+    project = get_project_by_id(payload.project_id, user_id=user_id)
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if payload.prompt and payload.prompt.strip():
+        asset = sync_create_visual_asset(
+            project,
+            user_id,
+            asset_type="2d_graphic",
+            title="AI Generated 2D Graphic",
+            prompt=payload.prompt.strip(),
+            section="2d_graphics",
+            job_kind="ai_generate_2d",
+            size=payload.size or "1536x1024",
+            quality="high",
+        )
+
+        update_project_media_rollups(payload.project_id, user_id)
+
+        add_project_activity(
+            payload.project_id,
+            user_id,
+            "graphics.generated",
+            "2D graphic generated",
+            detail="Generated from /ai/generate-2d",
+            meta={
+                "asset_id": asset.get("id"),
+                "format": payload.format,
+                "concept_id": payload.concept_id,
+            },
+        )
+
+        return {
+            "ok": True,
+            "message": "2D graphic generated",
+            "asset": asset,
+            "assets": [asset],
+        }
+
+    return generate_2d_graphics_endpoint(
+        payload.project_id,
+        GraphicsGenerateInput(
+            concept_index=payload.concept_index or 0,
+            count=payload.count,
+            generate_now=True,
+            feedback=payload.feedback,
+        ),
+        current_user,
+    )
+
 class VisualPolicyInput(BaseModel):
     preview_size: Optional[str] = None
     master_size: Optional[str] = None
@@ -2076,9 +2144,9 @@ def generate_moodboards_endpoint(project_id: str, payload: MoodboardGenerateInpu
     for i, prompt in enumerate(prompts, start=1):
         title = f"{concept.get('name') or 'Concept'} Moodboard {i}"
         if payload.generate_now:
-            assets.append(sync_create_visual_asset(project, user_id, "moodboard", title, prompt, section="moodboards", job_kind="concept_moodboard"))
+            assets.append(sync_create_visual_asset(project, user_id, "moodboard", title, prompt, section="moodboard", job_kind="concept_moodboard"))
         else:
-            asset = create_project_asset(project_id, user_id, "moodboard", title, prompt, "moodboards", "concept_moodboard", status="queued")
+            asset = create_project_asset(project_id, user_id, "moodboard", title, prompt, "moodboard", "concept_moodboard", status="queued")
             job = queue_agent_job_with_activity(project_id, user_id, "moodboard", "concept_moodboard", title, input_data={"asset_id": asset["id"], "prompt": prompt})
             queued_jobs.append(job)
             assets.append(asset)
