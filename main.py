@@ -4340,6 +4340,181 @@ def ucd_health():
         "time": _ucd_now_iso(),
     }
 
+# ---------------------------------------------------------------------
+# UCD Root Compatibility Route
+# Frontend calls: POST /ucd/think
+# This route does NOT require auth or DATABASE_URL.
+# ---------------------------------------------------------------------
+
+def _ucd_root_pick_action(message: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    text = (message or "").lower().strip()
+
+    has_brief = bool(state.get("has_brief"))
+    concepts_count = int(state.get("concepts_count") or 0)
+    has_final_concept = bool(state.get("has_final_concept"))
+    outputs_ready = bool(state.get("outputs_ready"))
+
+    if any(x in text for x in ["3d", "render", "renders", "show 3d", "open 3d"]):
+        return {
+            "action": "open_3d_renders",
+            "message": "Opened 3D Renders. These are ready for review — you can view, open, download, or copy the asset links.",
+        }
+
+    if any(x in text for x in ["moodboard", "mood board", "visual board"]):
+        return {
+            "action": "open_moodboard",
+            "message": "Opened Mood Board. This is where we shape the visual language before moving deeper into production.",
+        }
+
+    if any(x in text for x in ["concept", "concepts", "idea options", "creative options"]):
+        return {
+            "action": "open_concepts",
+            "message": "Opened Concepts. Review the three options and mark the strongest one as final so I can guide the next departments properly.",
+        }
+
+    if any(x in text for x in ["brief", "project brief", "open brief", "start a brief"]):
+        return {
+            "action": "open_project_brief",
+            "message": "Opened Project Brief. This is the foundation — I’ll use it to control the creative direction and department flow.",
+        }
+
+    if any(x in text for x in ["2d", "graphic", "graphics", "print design"]):
+        return {
+            "action": "open_2d_graphics",
+            "message": "Opened 2D Graphics. This department should focus on polished, print-ready and presentation-ready visuals.",
+        }
+
+    if any(x in text for x in ["lighting", "light", "lighting cues"]):
+        return {
+            "action": "open_lighting",
+            "message": "Opened Lighting. Once the final concept is locked, this becomes the lighting design manual and cue direction.",
+        }
+
+    if any(x in text for x in ["sound", "audio"]):
+        return {
+            "action": "open_sound",
+            "message": "Opened Sound. This department should handle sonic mood, music direction, SFX, and show atmosphere.",
+        }
+
+    if any(x in text for x in ["show runner", "showrunner", "run of show", "ros"]):
+        return {
+            "action": "open_show_runner",
+            "message": "Opened Show Runner. This is where we control the live execution script, cue stack, and show-flow.",
+        }
+
+    if any(x in text for x in ["all outputs", "outputs", "downloads", "download"]):
+        return {
+            "action": "open_all_outputs",
+            "message": "Opened All Outputs. Here you can review everything generated across departments.",
+        }
+
+    if any(x in text for x in [
+        "what should i do next",
+        "what next",
+        "next step",
+        "continue",
+        "guide me",
+        "what is missing",
+        "what's missing",
+        "what now",
+        "next"
+    ]):
+        if not has_brief:
+            return {
+                "action": "open_project_brief",
+                "message": "First, let’s strengthen the project brief. Add the event idea, audience, venue, brand/product, objective, style direction, and budget if available.",
+            }
+
+        if has_brief and concepts_count <= 0:
+            return {
+                "action": "open_project_brief",
+                "message": "The brief is ready enough to move forward. Next, we should generate three strong concept options based on the event objective, audience, brand tone, and deliverables.",
+            }
+
+        if concepts_count > 0 and not has_final_concept:
+            return {
+                "action": "open_concepts",
+                "message": "Your concepts are ready. Open the Concepts tab, choose the strongest option, then mark it as Final. After that I’ll activate only the required departments.",
+            }
+
+        if has_final_concept and not outputs_ready:
+            return {
+                "action": "open_moodboard",
+                "message": "Nice, now we are moving in the right direction. Since the final concept is selected, the next smart step is Mood Board or the specific department required by the deliverables.",
+            }
+
+        return {
+            "action": "open_all_outputs",
+            "message": "Production outputs are ready. Next, review each department output, give feedback where needed, then export the final package.",
+        }
+
+    if any(x in text for x in ["generate concepts", "create concepts", "make concepts"]):
+        return {
+            "action": "generate_concepts",
+            "message": "I’ll move into concept development. The right approach is to create three strong options, then lock one final direction before activating other departments.",
+        }
+
+    if any(x in text for x in ["generate moodboard", "create moodboard", "make moodboard"]):
+        return {
+            "action": "generate_moodboard",
+            "message": "I’ll prepare the mood board direction. It should feel like a proper visual story, not random references.",
+        }
+
+    if any(x in text for x in ["generate 3d", "create 3d", "make 3d render"]):
+        return {
+            "action": "generate_3d_renders",
+            "message": "I’ll prepare 3D render generation with cinematic angles, spatial depth, stage layout, branding, and audience experience.",
+        }
+
+    return {
+        "action": None,
+        "message": "I’m ready. Tell me what you want to do next — brief, concepts, mood board, 2D graphics, 3D renders, lighting, sound, show runner, or final downloads.",
+    }
+
+
+@app.post("/ucd/think")
+async def ucd_think_root(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    message = payload.get("message") or ""
+    user_name = (payload.get("user_name") or "").strip()
+    project_id = payload.get("project_id")
+    user_id = payload.get("user_id")
+
+    state = (
+        payload.get("state")
+        or payload.get("project_state")
+        or {}
+    )
+
+    if not isinstance(state, dict):
+        state = {}
+
+    if payload.get("current_tab") and not state.get("current_tab"):
+        state["current_tab"] = payload.get("current_tab")
+
+    decision = _ucd_root_pick_action(message, state)
+
+    reply_message = decision.get("message") or ""
+
+    if user_name and any(x in message.lower() for x in ["start", "next", "continue", "what"]):
+        reply_message = f"{user_name}, {reply_message}"
+
+    return {
+        "ok": True,
+        "agent": "Universal Creative Director Agent",
+        "short_name": "UCD Agent",
+        "action": decision.get("action"),
+        "message": reply_message,
+        "payload": {
+            "project_id": project_id,
+            "user_id": user_id,
+            "state": state,
+        },
+    }
 
 @app.get("/ucd/rates")
 def ucd_rates(current_user: Dict[str, Any] = Depends(get_current_user)):
