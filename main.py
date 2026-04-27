@@ -141,13 +141,17 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)?(lovable\.(app|dev)|lovableproject\.com)$",
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "https://lovable.dev",
+        "https://briefly-sparkle.lovable.app",
+    ],
+    allow_origin_regex=r"https://.*\.lovable\.app|https://.*\.lovableproject\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/exports", StaticFiles(directory=str(EXPORT_DIR)), name="exports")
