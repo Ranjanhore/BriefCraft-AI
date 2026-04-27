@@ -3833,7 +3833,818 @@ def generate_image_endpoint(payload: ImageGenerateInput, current_user: Dict[str,
     return result
 
 
-if __name__ == "__main__":
-    import uvicorn
+# =============================================================================
+# UCD AGENT — Universal Creative Director Agent Backend Brain
+# =============================================================================
 
-    uvicorn.run(app, host="0.0.0.0", port=PORT, workers=1)
+from pydantic import BaseModel
+from typing import Optional, Any, Dict, List
+import datetime as dt
+import json
+import re
+
+
+# ---------------------------------------------------------------------
+# UCD Models
+# ---------------------------------------------------------------------
+
+class UcdThinkRequest(BaseModel):
+    message: str = ""
+    project_id: Optional[str] = None
+    user_name: Optional[str] = None
+    current_tab: Optional[str] = None
+    brief: Optional[str] = None
+    project_state: Optional[Dict[str, Any]] = None
+
+
+class UcdDeliverableConfirmRequest(BaseModel):
+    deliverables: List[Dict[str, Any]] = []
+    user_note: Optional[str] = None
+
+
+class UcdDepartmentStartRequest(BaseModel):
+    department: str
+    run_type: str = "standard"
+    input_payload: Dict[str, Any] = {}
+
+
+class UcdReviewSnapshotRequest(BaseModel):
+    snapshot_type: str
+    title: str
+    content: Dict[str, Any] = {}
+    html_content: Optional[str] = None
+    markdown_content: Optional[str] = None
+
+
+# ---------------------------------------------------------------------
+# UCD DB helpers
+# ---------------------------------------------------------------------
+
+def _ucd_now_iso():
+    return dt.datetime.utcnow().isoformat() + "Z"
+
+
+def _ucd_user_id(current_user: Dict[str, Any]) -> str:
+    uid = (
+        current_user.get("id")
+        or current_user.get("user_id")
+        or current_user.get("sub")
+        or current_user.get("uid")
+    )
+    if not uid:
+        raise HTTPException(status_code=401, detail="User id missing from auth")
+    return str(uid)
+
+
+def _ucd_user_name(current_user: Dict[str, Any], fallback: Optional[str] = None) -> str:
+    return (
+        fallback
+        or current_user.get("full_name")
+        or current_user.get("name")
+        or current_user.get("email")
+        or "there"
+    )
+
+
+def _ucd_db_execute(query: str, params: tuple = (), fetch: str = "none"):
+    """
+    Uses existing psycopg DATABASE_URL.
+    This assumes DATABASE_URL is already present in your main.py.
+    """
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL missing")
+
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+
+            if fetch == "one":
+                row = cur.fetchone()
+                conn.commit()
+                return row
+
+            if fetch == "all":
+                rows = cur.fetchall()
+                conn.commit()
+                return rows
+
+            conn.commit()
+            return None
+
+
+def _ucd_safe_json(value: Any) -> str:
+    return json.dumps(value or {}, ensure_ascii=False)
+
+
+def _ucd_get_or_create_memory(user_id: str, user_name: str):
+    row = _ucd_db_execute(
+        """
+        insert into public.ucd_user_memory (user_id, user_name)
+        values (%s, %s)
+        on conflict (user_id) do update set
+          user_name = coalesce(excluded.user_name, public.ucd_user_memory.user_name),
+          updated_at = now()
+        returning *;
+        """,
+        (user_id, user_name),
+        fetch="one",
+    )
+    return row
+
+
+def _ucd_get_or_create_project_state(project_id: str, user_id: str):
+    row = _ucd_db_execute(
+        """
+        insert into public.ucd_project_state (project_id, user_id)
+        values (%s, %s)
+        on conflict (project_id) do update set
+          updated_at = now()
+        returning *;
+        """,
+        (project_id, user_id),
+        fetch="one",
+    )
+    return row
+
+
+def _ucd_log_chat(
+    user_id: str,
+    project_id: Optional[str],
+    sender: str,
+    message: str,
+    intent: Optional[str] = None,
+    action_taken: Optional[str] = None,
+    department: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    _ucd_db_execute(
+        """
+        insert into public.ucd_chat_messages
+        (project_id, user_id, sender, message, intent, action_taken, department, metadata)
+        values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb);
+        """,
+        (
+            project_id,
+            user_id,
+            sender,
+            message,
+            intent,
+            action_taken,
+            department,
+            _ucd_safe_json(metadata or {}),
+        ),
+    )
+
+
+def _ucd_log_decision(
+    user_id: str,
+    project_id: Optional[str],
+    decision_type: str,
+    decision_title: str,
+    decision_summary: str,
+    reason: str,
+    confidence: float = 0.85,
+    before_state: Optional[Dict[str, Any]] = None,
+    after_state: Optional[Dict[str, Any]] = None,
+):
+    _ucd_db_execute(
+        """
+        insert into public.ucd_decision_log
+        (user_id, project_id, decision_type, decision_title, decision_summary, reason, confidence, before_state, after_state)
+        values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb);
+        """,
+        (
+            user_id,
+            project_id,
+            decision_type,
+            decision_title,
+            decision_summary,
+            reason,
+            confidence,
+            _ucd_safe_json(before_state or {}),
+            _ucd_safe_json(after_state or {}),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------
+# UCD Brain logic
+# ---------------------------------------------------------------------
+
+def _ucd_detect_intent(message: str) -> str:
+    m = (message or "").lower().strip()
+
+    if any(x in m for x in ["next step", "what now", "continue", "guide me", "what should i do", "what's missing", "whats missing"]):
+        return "advise_next_step"
+
+    if any(x in m for x in ["deliverable", "deliverables", "what output", "what do we need"]):
+        return "recommend_deliverables"
+
+    if any(x in m for x in ["brief", "refine brief", "improve brief", "make brief"]):
+        return "brief_refinement"
+
+    if any(x in m for x in ["concept", "idea", "creative route"]):
+        return "concept_direction"
+
+    if any(x in m for x in ["moodboard", "mood board", "visual direction"]):
+        return "moodboard_direction"
+
+    if any(x in m for x in ["2d", "graphic", "key visual", "print"]):
+        return "graphics_2d_direction"
+
+    if any(x in m for x in ["3d", "render", "stage", "booth", "stall", "environment"]):
+        return "render_3d_direction"
+
+    if any(x in m for x in ["cost", "credit", "token", "price", "budget"]):
+        return "credit_estimate"
+
+    return "general_ucd_chat"
+
+
+def _ucd_time_greeting(user_name: str = "there") -> str:
+    hour = dt.datetime.now().hour
+    if hour < 12:
+        greeting = "Good morning"
+    elif hour < 17:
+        greeting = "Good afternoon"
+    else:
+        greeting = "Good evening"
+
+    if user_name and user_name not in ["there", "None"]:
+        return f"{greeting}, {user_name}."
+    return f"{greeting}."
+
+
+def _ucd_recommend_deliverables_from_brief(brief: str) -> List[Dict[str, Any]]:
+    text = (brief or "").lower()
+
+    deliverables = [
+        {
+            "deliverable_key": "structured_brief",
+            "deliverable_title": "Refined Structured Brief",
+            "deliverable_type": "content",
+            "department": "brief",
+            "priority": 1,
+            "is_required": True,
+            "ucd_reason": "Every project should start with a clean, formal, client-ready brief.",
+        },
+        {
+            "deliverable_key": "creative_concepts",
+            "deliverable_title": "3 Creative Concept Options",
+            "deliverable_type": "content",
+            "department": "concept",
+            "priority": 2,
+            "is_required": True,
+            "ucd_reason": "The user needs strong creative routes before visual production begins.",
+        },
+    ]
+
+    if any(x in text for x in ["launch", "brand", "premium", "corporate", "conference", "activation", "exhibition", "mall", "product", "car", "automobile"]):
+        deliverables.append({
+            "deliverable_key": "moodboard",
+            "deliverable_title": "Moodboard / Visual Direction",
+            "deliverable_type": "visual",
+            "department": "moodboard",
+            "priority": 3,
+            "is_required": True,
+            "ucd_reason": "A premium event needs a visual language before design and render generation.",
+        })
+
+    if any(x in text for x in ["graphic", "poster", "kv", "key visual", "print", "banner", "standee", "backdrop", "social"]):
+        deliverables.append({
+            "deliverable_key": "graphics_2d",
+            "deliverable_title": "2D Graphic Design Set",
+            "deliverable_type": "design",
+            "department": "graphics_2d",
+            "priority": 4,
+            "is_required": True,
+            "ucd_reason": "The brief indicates a need for print or digital graphic assets.",
+        })
+
+    if any(x in text for x in ["3d", "stage", "stall", "booth", "exhibition", "space", "render", "venue", "walkthrough", "set"]):
+        deliverables.append({
+            "deliverable_key": "renders_3d",
+            "deliverable_title": "3D Render Views",
+            "deliverable_type": "render",
+            "department": "render_3d",
+            "priority": 5,
+            "is_required": True,
+            "ucd_reason": "Spatial/event setup work needs 3D visualization for approval.",
+        })
+
+    if any(x in text for x in ["show", "performance", "stage", "artist", "launch moment", "reveal"]):
+        deliverables.append({
+            "deliverable_key": "show_running_script",
+            "deliverable_title": "Show Running Script",
+            "deliverable_type": "show_document",
+            "department": "show_running",
+            "priority": 6,
+            "is_required": False,
+            "ucd_reason": "A live show or launch moment benefits from cue-based show running.",
+        })
+
+    return deliverables
+
+
+def _ucd_next_step_message(state: Dict[str, Any], brief: str, user_name: str) -> Dict[str, Any]:
+    current_stage = state.get("current_stage") if state else None
+    brief_status = state.get("brief_status") if state else "draft"
+    concept_status = state.get("concept_status") if state else "pending"
+    moodboard_status = state.get("moodboard_status") if state else "pending"
+    graphics_status = state.get("graphics_2d_status") if state else "pending"
+    render_status = state.get("render_3d_status") if state else "pending"
+
+    if not brief or len(brief.strip()) < 30:
+        return {
+            "message": "Let’s first make the brief stronger. Share the event type, brand/product, audience, venue, objective, preferred style, and tentative budget. Then I’ll convert it into a polished client-ready brief.",
+            "next_action": "collect_brief_details",
+            "department": "brief",
+        }
+
+    if brief_status in ["draft", "pending"]:
+        return {
+            "message": "The direction is good. Next I should refine this into a formal structured brief, fill the missing parts with smart assumptions, and show it in fullscreen for your review.",
+            "next_action": "refine_brief",
+            "department": "brief",
+        }
+
+    if concept_status in ["pending", "draft"]:
+        return {
+            "message": "Now we are ready for concepts. I’ll keep only the Brief and Concept departments active, create 3 strong concept routes, and then you can select one final route for further production.",
+            "next_action": "generate_concepts",
+            "department": "concept",
+        }
+
+    if moodboard_status in ["pending", "draft"]:
+        return {
+            "message": "The selected concept should now move into visual direction. Moodboard is the right next department, unless you want to directly create only 2D graphics or 3D renders.",
+            "next_action": "generate_moodboard",
+            "department": "moodboard",
+        }
+
+    if graphics_status in ["pending", "draft"]:
+        return {
+            "message": "Next we can move into 2D graphics. I’ll keep this department focused on clean thumbnails, fullscreen review, feedback, and download-ready outputs.",
+            "next_action": "generate_2d_graphics",
+            "department": "graphics_2d",
+        }
+
+    if render_status in ["pending", "draft"]:
+        return {
+            "message": "Next we can move into 3D renders. I’ll prepare it like a professional visualization workflow: progress state, render cards, fullscreen review, feedback, and final download.",
+            "next_action": "generate_3d_renders",
+            "department": "render_3d",
+        }
+
+    return {
+        "message": "The project is moving well. Next I’d prepare the final presentation/export layer so the work becomes client-ready instead of staying only as separate assets.",
+        "next_action": "prepare_presentation",
+        "department": "presentation",
+    }
+
+
+def _ucd_credit_estimate(departments: List[str]) -> Dict[str, Any]:
+    if not departments:
+        departments = ["brief", "concept"]
+
+    rows = _ucd_db_execute(
+        """
+        select department, display_name, hourly_rate_inr, credits_per_hour, average_minutes_per_output
+        from public.ucd_credit_rates
+        where department = any(%s)
+          and is_active = true;
+        """,
+        (departments,),
+        fetch="all",
+    )
+
+    total_credits = 0
+    total_inr = 0
+    items = []
+
+    for r in rows:
+        minutes = r.get("average_minutes_per_output") or 60
+        credits = round((float(r.get("credits_per_hour") or 0) / 60) * minutes, 2)
+        amount = round((float(r.get("hourly_rate_inr") or 0) / 60) * minutes, 2)
+
+        total_credits += credits
+        total_inr += amount
+
+        items.append({
+            "department": r["department"],
+            "display_name": r["display_name"],
+            "estimated_minutes": minutes,
+            "estimated_credits": credits,
+            "estimated_inr": amount,
+        })
+
+    return {
+        "items": items,
+        "total_credits": round(total_credits, 2),
+        "total_inr": round(total_inr, 2),
+    }
+
+
+def _ucd_format_reply(intent: str, user_name: str, message: str, project_state: Dict[str, Any], brief: str):
+    greeting = _ucd_time_greeting(user_name)
+
+    if intent == "recommend_deliverables":
+        deliverables = _ucd_recommend_deliverables_from_brief(brief or message)
+        departments = [d["department"] for d in deliverables]
+        credit = _ucd_credit_estimate(departments)
+        return {
+            "message": f"{greeting} I’ve mapped the required deliverables. My suggestion is to keep the workflow focused: Brief → Concept → Moodboard/Visual Direction → required production departments only. This avoids wasting credits on departments we don’t need.",
+            "intent": intent,
+            "action": "show_deliverables",
+            "deliverables": deliverables,
+            "credit_estimate": credit,
+        }
+
+    if intent == "advise_next_step":
+        step = _ucd_next_step_message(project_state or {}, brief or message, user_name)
+        return {
+            "message": step["message"],
+            "intent": intent,
+            "action": step["next_action"],
+            "department": step["department"],
+        }
+
+    if intent == "brief_refinement":
+        return {
+            "message": "Interesting direction. I’ll treat this like a premium creative brief, not just a text note. First I’ll check what is missing: objective, audience, venue, brand tone, deliverables, budget scale, and success expectation. Then I’ll refine it into a professional client-ready format.",
+            "intent": intent,
+            "action": "refine_brief",
+            "department": "brief",
+        }
+
+    if intent == "concept_direction":
+        return {
+            "message": "Good, now we are entering the creative zone. For concepts, I should create 3 strong routes with proper storytelling, event logic, audience emotion, brand/product relevance, reveal moments, visual language, and practical execution notes.",
+            "intent": intent,
+            "action": "generate_concepts",
+            "department": "concept",
+        }
+
+    if intent == "moodboard_direction":
+        return {
+            "message": "For moodboard, I’ll keep it structured like a visual presentation: 16:9 frames, image direction, color language, material mood, lighting feel, reference explanation, and why each visual supports the concept.",
+            "intent": intent,
+            "action": "generate_moodboard",
+            "department": "moodboard",
+        }
+
+    if intent == "graphics_2d_direction":
+        return {
+            "message": "For 2D graphics, I’ll push toward premium print-ready thinking: key visual, layout direction, typography mood, brand placement, thumbnail gallery, fullscreen review, feedback loop, and export/download flow.",
+            "intent": intent,
+            "action": "generate_2d_graphics",
+            "department": "graphics_2d",
+        }
+
+    if intent == "render_3d_direction":
+        return {
+            "message": "For 3D, I’ll handle it like a studio render pipeline: scene planning, camera angles, material direction, lighting mood, render progress, fullscreen preview, feedback, and final selected views.",
+            "intent": intent,
+            "action": "generate_3d_renders",
+            "department": "render_3d",
+        }
+
+    if intent == "credit_estimate":
+        departments = ["brief", "concept", "moodboard", "graphics_2d", "render_3d"]
+        credit = _ucd_credit_estimate(departments)
+        return {
+            "message": f"Here’s the working estimate. The smart way is to activate only the departments required for this project, so the user does not burn unnecessary credits.",
+            "intent": intent,
+            "action": "show_credit_estimate",
+            "credit_estimate": credit,
+        }
+
+    return {
+        "message": "I’m with you. Tell me what you want to improve next: brief, deliverables, concepts, moodboard, 2D graphics, 3D renders, or final presentation.",
+        "intent": intent,
+        "action": "general_reply",
+    }
+
+
+# ---------------------------------------------------------------------
+# UCD API Routes
+# ---------------------------------------------------------------------
+
+@app.get("/ucd/health")
+def ucd_health():
+    return {
+        "ok": True,
+        "agent": "Universal Creative Director Agent",
+        "short_name": "UCD Agent",
+        "status": "ready",
+        "time": _ucd_now_iso(),
+    }
+
+
+@app.get("/ucd/rates")
+def ucd_rates(current_user: Dict[str, Any] = Depends(get_current_user)):
+    rows = _ucd_db_execute(
+        """
+        select department, display_name, hourly_rate_inr, credits_per_hour, average_minutes_per_output, description
+        from public.ucd_credit_rates
+        where is_active = true
+        order by hourly_rate_inr asc;
+        """,
+        fetch="all",
+    )
+    return {"ok": True, "rates": rows}
+
+
+@app.post("/projects/{project_id}/ucd/init")
+def ucd_project_init(
+    project_id: str,
+    body: UcdThinkRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+    user_name = _ucd_user_name(current_user, body.user_name)
+
+    memory = _ucd_get_or_create_memory(user_id, user_name)
+    state = _ucd_get_or_create_project_state(project_id, user_id)
+
+    _ucd_log_chat(
+        user_id=user_id,
+        project_id=project_id,
+        sender="ucd",
+        message=f"{_ucd_time_greeting(user_name)} I’m ready to guide this project like your creative director.",
+        intent="init",
+        action_taken="project_ucd_initialized",
+    )
+
+    return {
+        "ok": True,
+        "memory": memory,
+        "state": state,
+        "message": f"{_ucd_time_greeting(user_name)} I’m ready. Share the brief and I’ll start shaping it properly.",
+    }
+
+
+@app.get("/projects/{project_id}/ucd/state")
+def ucd_project_state(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+    state = _ucd_get_or_create_project_state(project_id, user_id)
+
+    deliverables = _ucd_db_execute(
+        """
+        select *
+        from public.ucd_project_deliverables
+        where project_id = %s and user_id = %s
+        order by priority asc, created_at asc;
+        """,
+        (project_id, user_id),
+        fetch="all",
+    )
+
+    runs = _ucd_db_execute(
+        """
+        select *
+        from public.ucd_department_runs
+        where project_id = %s and user_id = %s
+        order by created_at desc
+        limit 20;
+        """,
+        (project_id, user_id),
+        fetch="all",
+    )
+
+    return {
+        "ok": True,
+        "state": state,
+        "deliverables": deliverables,
+        "department_runs": runs,
+    }
+
+
+@app.post("/projects/{project_id}/ucd/think")
+def ucd_think(
+    project_id: str,
+    body: UcdThinkRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+    user_name = _ucd_user_name(current_user, body.user_name)
+
+    _ucd_get_or_create_memory(user_id, user_name)
+    state = _ucd_get_or_create_project_state(project_id, user_id)
+
+    message = body.message or ""
+    brief = body.brief or ""
+    intent = _ucd_detect_intent(message)
+
+    _ucd_log_chat(
+        user_id=user_id,
+        project_id=project_id,
+        sender="user",
+        message=message,
+        intent=intent,
+    )
+
+    reply = _ucd_format_reply(
+        intent=intent,
+        user_name=user_name,
+        message=message,
+        project_state=state or {},
+        brief=brief,
+    )
+
+    _ucd_log_chat(
+        user_id=user_id,
+        project_id=project_id,
+        sender="ucd",
+        message=reply.get("message", ""),
+        intent=intent,
+        action_taken=reply.get("action"),
+        department=reply.get("department"),
+        metadata=reply,
+    )
+
+    _ucd_log_decision(
+        user_id=user_id,
+        project_id=project_id,
+        decision_type="ucd_think",
+        decision_title=f"UCD handled intent: {intent}",
+        decision_summary=reply.get("message", ""),
+        reason="Intent was detected from user chat and routed to UCD decision logic.",
+        after_state={"reply": reply},
+    )
+
+    return {
+        "ok": True,
+        "agent": "UCD Agent",
+        **reply,
+    }
+
+
+@app.post("/projects/{project_id}/ucd/deliverables/recommend")
+def ucd_recommend_deliverables(
+    project_id: str,
+    body: UcdThinkRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+    user_name = _ucd_user_name(current_user, body.user_name)
+
+    _ucd_get_or_create_project_state(project_id, user_id)
+
+    brief = body.brief or body.message or ""
+    deliverables = _ucd_recommend_deliverables_from_brief(brief)
+    departments = [d["department"] for d in deliverables]
+    credit = _ucd_credit_estimate(departments)
+
+    return {
+        "ok": True,
+        "message": "I’ve recommended the required deliverables and estimated the credits.",
+        "deliverables": deliverables,
+        "credit_estimate": credit,
+    }
+
+
+@app.post("/projects/{project_id}/ucd/deliverables/confirm")
+def ucd_confirm_deliverables(
+    project_id: str,
+    body: UcdDeliverableConfirmRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+
+    for idx, d in enumerate(body.deliverables):
+        _ucd_db_execute(
+            """
+            insert into public.ucd_project_deliverables
+            (project_id, user_id, deliverable_key, deliverable_title, deliverable_type, department, priority,
+             status, is_required, is_user_confirmed, ucd_reason, user_note, metadata)
+            values (%s, %s, %s, %s, %s, %s, %s, 'planned', %s, true, %s, %s, %s::jsonb);
+            """,
+            (
+                project_id,
+                user_id,
+                d.get("deliverable_key") or d.get("key") or f"deliverable_{idx+1}",
+                d.get("deliverable_title") or d.get("title") or f"Deliverable {idx+1}",
+                d.get("deliverable_type") or "creative_output",
+                d.get("department") or "brief",
+                d.get("priority") or idx + 1,
+                bool(d.get("is_required", True)),
+                d.get("ucd_reason"),
+                body.user_note,
+                _ucd_safe_json(d),
+            ),
+        )
+
+    departments = list({d.get("department") or "brief" for d in body.deliverables})
+
+    _ucd_db_execute(
+        """
+        update public.ucd_project_state
+        set deliverables_status = 'confirmed',
+            active_departments = %s::jsonb,
+            ucd_next_action = 'start_required_department_workflow',
+            updated_at = now()
+        where project_id = %s and user_id = %s;
+        """,
+        (_ucd_safe_json(departments), project_id, user_id),
+    )
+
+    return {
+        "ok": True,
+        "message": "Deliverables confirmed and stored. I’ll now activate only the required departments.",
+        "active_departments": departments,
+    }
+
+
+@app.post("/projects/{project_id}/ucd/department/start")
+def ucd_department_start(
+    project_id: str,
+    body: UcdDepartmentStartRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+
+    credit = _ucd_credit_estimate([body.department])
+    item = credit["items"][0] if credit.get("items") else {}
+
+    row = _ucd_db_execute(
+        """
+        insert into public.ucd_department_runs
+        (project_id, user_id, department, run_type, status, progress, progress_label, progress_effect,
+         input_payload, estimated_minutes, estimated_credits, started_at)
+        values (%s, %s, %s, %s, 'running', 1, %s, %s, %s::jsonb, %s, %s, now())
+        returning *;
+        """,
+        (
+            project_id,
+            user_id,
+            body.department,
+            body.run_type,
+            "Starting department workflow",
+            _ucd_department_effect(body.department),
+            _ucd_safe_json(body.input_payload),
+            item.get("estimated_minutes", 60),
+            item.get("estimated_credits", 0),
+        ),
+        fetch="one",
+    )
+
+    return {
+        "ok": True,
+        "message": f"{body.department} department started.",
+        "department_run": row,
+    }
+
+
+def _ucd_department_effect(department: str) -> str:
+    effects = {
+        "brief": "typing_writer_progress",
+        "concept": "story_writing_progress",
+        "moodboard": "thinking_visual_board_progress",
+        "graphics_2d": "sketch_to_design_progress",
+        "render_3d": "vray_render_bucket_progress",
+        "light_design": "lighting_cue_progress",
+        "sound_design": "audio_waveform_progress",
+        "show_running": "cue_sheet_progress",
+        "presentation": "deck_build_progress",
+        "export": "file_export_progress",
+        "account": "credit_calculation_progress",
+    }
+    return effects.get(department, "standard_progress")
+
+
+@app.post("/projects/{project_id}/ucd/review-snapshot")
+def ucd_create_review_snapshot(
+    project_id: str,
+    body: UcdReviewSnapshotRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    user_id = _ucd_user_id(current_user)
+
+    row = _ucd_db_execute(
+        """
+        insert into public.ucd_review_snapshots
+        (project_id, user_id, snapshot_type, title, content, html_content, markdown_content)
+        values (%s, %s, %s, %s, %s::jsonb, %s, %s)
+        returning *;
+        """,
+        (
+            project_id,
+            user_id,
+            body.snapshot_type,
+            body.title,
+            _ucd_safe_json(body.content),
+            body.html_content,
+            body.markdown_content,
+        ),
+        fetch="one",
+    )
+
+    return {
+        "ok": True,
+        "message": "Review snapshot saved.",
+        "snapshot": row,
+    }
