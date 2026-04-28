@@ -498,140 +498,299 @@ def transcribe_audio_file(path: Path) -> str:
     return getattr(result, "text", "") or ""
 
 
-def create_local_placeholder_image(prompt: str, size: str = "1024x1024") -> str:
-    try:
-        from PIL import Image, ImageDraw, ImageFont
+# ------------------------------------------------------------------------------
+# OpenAI image generation + Supabase Storage helpers
+# ------------------------------------------------------------------------------
 
-        width, height = parse_size(size, (1024, 1024))
-        width = min(max(width, 512), 1536)
-        height = min(max(height, 512), 1536)
+def _safe_storage_name(value: str) -> str:
+    value = str(value or "asset").strip().lower()
+    value = re.sub(r"[^a-z0-9._-]+", "-", value)
+    value = re.sub(r"-+", "-", value).strip("-._")
+    return value or "asset"
 
-        img = Image.new("RGB", (width, height), (18, 18, 26))
-        draw = ImageDraw.Draw(img)
 
-        try:
-            font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
-            font_body = ImageFont.truetype("DejaVuSans.ttf", 24)
-        except Exception:
-            font_title = ImageFont.load_default()
-            font_body = ImageFont.load_default()
+def _extract_openai_image_payload(response: Any) -> str:
+    """
+    Extract image payload from OpenAI image response.
 
-        draw.rectangle([40, 40, width - 40, height - 40], outline=(180, 160, 110), width=4)
-        draw.text((70, 70), "BriefCraft AI Visual", fill=(245, 230, 190), font=font_title)
+    Supports:
+    - response.data[0].b64_json
+    - response.data[0].url
+    - response.output image_generation_call result
+    """
+    data = getattr(response, "data", None)
+    if not data and isinstance(response, dict):
+        data = response.get("data")
 
-        wrapped = []
-        words = (prompt or "Generated event visual").split()
-        line = ""
-        for word in words:
-            test = f"{line} {word}".strip()
-            if len(test) > 48:
-                wrapped.append(line)
-                line = word
-            else:
-                line = test
-        if line:
-            wrapped.append(line)
-
-        y = 150
-        for line in wrapped[:12]:
-            draw.text((70, y), line, fill=(235, 235, 240), font=font_body)
-            y += 38
-
-        draw.text((70, height - 110), "Fallback preview generated because OpenAI image call failed.", fill=(190, 190, 200), font=font_body)
-
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
-
-    except Exception as e:
-        print("Local placeholder image failed:", repr(e))
-        tiny_png = (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
-            "AAAADUlEQVR42mP8z8BQDwAFgwJ/lJ2Y5wAAAABJRU5ErkJggg=="
+    if data:
+        first = data[0]
+        b64 = getattr(first, "b64_json", None) or (
+            first.get("b64_json") if isinstance(first, dict) else None
         )
-        return f"data:image/png;base64,{tiny_png}"
-
-
-def generate_image_data_url(prompt: str, size: str = "1024x1024", quality: str = "high") -> Optional[str]:
-    if not _openai_client:
-        print("Image generation failed: OpenAI client not configured")
-        return create_local_placeholder_image(prompt, size)
-
-    requested_model = IMAGE_MODEL or "dall-e-3"
-
-    try:
-        if requested_model == "dall-e-3":
-            safe_size = size if size in {"1024x1024", "1792x1024", "1024x1792"} else "1024x1024"
-            safe_quality = "hd" if quality in {"high", "hd"} else "standard"
-        else:
-            safe_size = size if size else "1024x1024"
-            safe_quality = quality or "high"
-
-        response = _openai_client.images.generate(
-            model=requested_model,
-            prompt=prompt,
-            size=safe_size,
-            quality=safe_quality,
-            n=1,
+        url = getattr(first, "url", None) or (
+            first.get("url") if isinstance(first, dict) else None
         )
 
-        first = response.data[0]
-
-        b64 = getattr(first, "b64_json", None)
         if b64:
             return f"data:image/png;base64,{b64}"
 
-        url = getattr(first, "url", None)
         if url:
-            return url
+            return str(url)
 
-        print("Image generation failed: no b64_json or url returned")
-        return create_local_placeholder_image(prompt, size)
+    output = getattr(response, "output", None)
+    if not output and isinstance(response, dict):
+        output = response.get("output")
 
-    except Exception as e:
-        print("Image generation failed full error:", repr(e))
+    if output:
+        for item in output:
+            typ = getattr(item, "type", None) or (
+                item.get("type") if isinstance(item, dict) else ""
+            )
+            result = getattr(item, "result", None) or (
+                item.get("result") if isinstance(item, dict) else None
+            )
 
-        try:
-            fallback_response = _openai_client.images.generate(
-                model="dall-e-3",
+            if typ == "image_generation_call" and result:
+                return f"data:image/png;base64,{result}"
+
+    raise RuntimeError(
+        "OpenAI image generation returned no b64_json, URL, or image_generation_call result."
+    )
+
+
+def _decode_image_payload(image_payload: str) -> Tuple[bytes, str, str]:
+    """
+    Accepts:
+    - data:image/png;base64,...
+    - raw base64
+    - http/https image URL
+
+    Returns:
+    - image_bytes
+    - content_type
+    - extension
+    """
+    import mimetypes
+    import requests
+
+    if not image_payload:
+        raise ValueError("No image payload received")
+
+    payload = str(image_payload).strip()
+
+    if payload.startswith("http://") or payload.startswith("https://"):
+        res = requests.get(payload, timeout=120)
+        res.raise_for_status()
+
+        content_type = (
+            res.headers.get("content-type") or "image/png"
+        ).split(";", 1)[0].strip()
+
+        if not content_type.startswith("image/"):
+            raise ValueError(
+                f"Image URL did not return an image. content-type={content_type}"
+            )
+
+        ext = mimetypes.guess_extension(content_type) or ".png"
+        return res.content, content_type, ext
+
+    content_type = "image/png"
+    b64 = payload
+
+    match = re.match(
+        r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$",
+        payload,
+        flags=re.S,
+    )
+
+    if match:
+        content_type = match.group(1)
+        b64 = match.group(2)
+
+    b64 = re.sub(r"\s+", "", b64)
+
+    image_bytes = base64.b64decode(b64, validate=False)
+
+    if len(image_bytes) < 1000:
+        raise ValueError(
+            "Decoded image payload is too small; refusing to save broken/placeholder image."
+        )
+
+    ext = mimetypes.guess_extension(content_type) or ".png"
+    return image_bytes, content_type, ext
+
+
+def _upload_image_bytes_to_supabase(
+    image_bytes: bytes,
+    storage_path: str,
+    content_type: str = "image/png",
+) -> str:
+    """
+    Upload generated image bytes to Supabase Storage and return a public URL.
+    """
+    import requests
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set on Render."
+        )
+
+    bucket = SUPABASE_STORAGE_BUCKET or "briefcraft-assets"
+    storage_path = storage_path.lstrip("/")
+
+    upload_url = (
+        f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/"
+        f"{bucket}/{storage_path}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type": content_type,
+        "Cache-Control": "31536000",
+        "x-upsert": "true",
+    }
+
+    res = requests.post(
+        upload_url,
+        headers=headers,
+        data=image_bytes,
+        timeout=180,
+    )
+
+    if res.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Supabase Storage upload failed {res.status_code}: {res.text[:500]}"
+        )
+
+    return (
+        f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/public/"
+        f"{bucket}/{storage_path}"
+    )
+
+
+def generate_image_data_url(
+    prompt: str,
+    size: str = "1536x1024",
+    quality: str = "high",
+) -> str:
+    """
+    Generate one real image.
+
+    No fake placeholder.
+    No DALL-E fallback unless IMAGE_MODEL is intentionally set to DALL-E.
+    If OpenAI fails, return the real error to Render logs.
+    """
+    if not _openai_client:
+        raise HTTPException(status_code=500, detail="OpenAI client not configured")
+
+    requested_model = (
+        os.getenv("OPENAI_IMAGE_MODEL")
+        or os.getenv("IMAGE_MODEL")
+        or IMAGE_MODEL
+        or "gpt-image-1"
+    ).strip()
+
+    requested_size = (
+        size
+        or os.getenv("VISUAL_MASTER_SIZE")
+        or os.getenv("VISUAL_PREVIEW_SIZE")
+        or "1536x1024"
+    ).strip()
+
+    requested_quality = (
+        quality
+        or os.getenv("IMAGE_QUALITY")
+        or "high"
+    ).strip()
+
+    try:
+        if requested_model.startswith("gpt-image"):
+            safe_size = requested_size if requested_size in {
+                "1024x1024",
+                "1536x1024",
+                "1024x1536",
+                "auto",
+            } else "1536x1024"
+
+            safe_quality = requested_quality if requested_quality in {
+                "low",
+                "medium",
+                "high",
+                "auto",
+            } else "high"
+
+            response = _openai_client.images.generate(
+                model=requested_model,
                 prompt=prompt,
-                size="1024x1024",
-                quality="standard",
+                size=safe_size,
+                quality=safe_quality,
+                output_format="png",
                 n=1,
             )
 
-            first = fallback_response.data[0]
+        else:
+            safe_size = requested_size if requested_size in {
+                "1024x1024",
+                "1792x1024",
+                "1024x1792",
+            } else "1024x1024"
 
-            b64 = getattr(first, "b64_json", None)
-            if b64:
-                return f"data:image/png;base64,{b64}"
+            safe_quality = "hd" if requested_quality in {"high", "hd"} else "standard"
 
-            url = getattr(first, "url", None)
-            if url:
-                return url
+            response = _openai_client.images.generate(
+                model=requested_model,
+                prompt=prompt,
+                size=safe_size,
+                quality=safe_quality,
+                response_format="b64_json",
+                n=1,
+            )
 
-            print("Fallback image generation failed: no image returned")
-            return create_local_placeholder_image(prompt, size)
+        return _extract_openai_image_payload(response)
 
-        except Exception as fallback_error:
-            print("Fallback image generation failed full error:", repr(fallback_error))
-            return create_local_placeholder_image(prompt, size)
+    except Exception as exc:
+        print("OpenAI image generation failed full error:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI image generation failed: {repr(exc)}",
+        )
 
 
-def persist_data_url_image(data_url: str, target_dir: Path, prefix: str) -> Tuple[str, str]:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{prefix}_{uuid.uuid4().hex}.png"
-    out_path = target_dir / filename
+def persist_data_url_image(
+    data_url: str,
+    target_dir: Path,
+    prefix: str,
+) -> Tuple[str, str]:
+    """
+    Drop-in replacement for old local /renders saver.
 
-    if data_url.startswith("data:image"):
-        _, b64 = data_url.split(",", 1)
-        out_path.write_bytes(base64.b64decode(b64))
-    else:
-        raise HTTPException(status_code=500, detail="Image response was not a base64 data URL")
+    Existing callers can still call:
+        persist_data_url_image(data_url, RENDER_OUTPUT_DIR, prefix)
 
-    rel = relative_public_url(out_path)
-    return rel, absolute_public_url(rel)
+    But this now uploads to Supabase Storage and returns:
+        storage_path, public_url
+    """
+    import time
+
+    image_bytes, content_type, ext = _decode_image_payload(data_url)
+
+    ext = ext if ext.startswith(".") else f".{ext}"
+
+    clean_prefix = _safe_storage_name(prefix or "generated-image")
+
+    storage_path = (
+        f"projects/shared/{clean_prefix}/"
+        f"{int(time.time())}-{uuid.uuid4().hex[:10]}{ext}"
+    )
+
+    public_url = _upload_image_bytes_to_supabase(
+        image_bytes=image_bytes,
+        storage_path=storage_path,
+        content_type=content_type,
+    )
+
+    return storage_path, public_url
 
 
 # ------------------------------------------------------------------------------
@@ -1127,25 +1286,85 @@ def update_project_media_rollups(project_id: str, user_id: str) -> Dict[str, Any
     return db_update("projects", project_id, {"media_rollup": rollup})
 
 
-def build_concept_visual_prompts(project: Dict[str, Any], concept: Dict[str, Any], count: int = 3) -> List[str]:
-    base = (
-        f"Create a premium 16:9 event design visual for project '{project.get('project_name')}'. "
-        f"Concept: {concept.get('name')}. "
-        f"Summary: {concept.get('summary')}. "
-        f"Colors: {', '.join(concept.get('colors') or [])}. "
-        f"Style: {concept.get('style')}. "
-        "High-end stage design, scenic depth, branded environment, realistic lighting, production design."
+def build_concept_visual_prompts(
+    project: Dict[str, Any],
+    concept: Dict[str, Any],
+    count: int = 3,
+) -> List[str]:
+    project_name = project.get("project_name") or project.get("name") or "Premium Event"
+    brief = project.get("brief_text") or ""
+    concept_name = concept.get("name") or "Selected Concept"
+    concept_summary = (
+        concept.get("summary")
+        or concept.get("oneLiner")
+        or "Premium visual direction"
     )
-    prompt_variations = [
-        base + " Moodboard board with textures, references, scenic material samples, typography cues.",
-        base + " Hero stage render perspective from audience center, cinematic reveal angle.",
-        base + " Wide venue overview showing entry, stage, LED surfaces, and guest flow.",
-        base + " Top-down stage + audience composition board with lighting mood and scenic composition.",
-        base + " VIP experience corner, premium entry, hospitality, and branded feature moments.",
-        base + " Alternate hero perspective with stronger lighting contrast and immersive screens.",
-    ]
-    return prompt_variations[: max(1, min(count, len(prompt_variations)))]
+    style = concept.get("style") or "premium futuristic cinematic"
+    colors = ", ".join(
+        concept.get("colors")
+        or ["black", "deep blue", "gold", "warm white", "chrome"]
+    )
 
+    base = f"""
+Create a real image-led professional event mood board collage in 16:9 landscape format.
+
+Project:
+{project_name}
+
+Selected concept:
+{concept_name}
+
+Concept summary:
+{concept_summary}
+
+Brief context:
+{brief[:900]}
+
+Style:
+{style}
+
+Color palette:
+{colors}
+
+The final image must be dominated by photoreal event visuals, not paragraphs or prompt text.
+
+Create a premium AI / luxury event design reference sheet with thin gold dividers and many real-looking visual panels.
+
+Include visual panels for:
+- cinematic keynote stage with large LED wall and audience
+- futuristic immersive entry tunnel
+- luxury registration / welcome desk
+- networking lounge
+- demo zone / interactive AI screens
+- photo opportunity zone
+- materials and texture references: black marble, brushed gold, glass, chrome, LED pixels
+- lighting mood references: blue beams, warm gold accents, haze, reflections
+- experience touchpoints and guest journey
+
+Visual style:
+black, deep blue, gold, warm white, chrome, glass, cinematic reflections, premium technology, luxurious event production.
+
+IMPORTANT NEGATIVE INSTRUCTIONS:
+Do not create a black text card.
+Do not write the prompt into the image.
+Do not create long paragraphs inside the image.
+Do not create empty gradient panels.
+Do not create a UI screen.
+Do not create a simple poster.
+Do not make the image mostly typography.
+The final output must look like a finished visual mood board image with real mood references.
+""".strip()
+
+    variations = [
+        base + "\n\nComposition: full mood board reference sheet, multiple panels, color palette, visual language, materials, lighting mood, experience touchpoints.",
+        base + "\n\nComposition: focus on guest journey, entry tunnel, registration, demo zone, lounge, photo-op, with material and lighting strips.",
+        base + "\n\nComposition: focus on hero keynote stage, LED wall, audience reveal, premium show lighting, cinematic brand world, with supporting reference tiles.",
+        base + "\n\nComposition: refined luxury-tech board with large hero stage image, immersive tunnel image, lounge image, and small swatches for materials and lighting.",
+        base + "\n\nComposition: production-ready visual direction board for designers and 3D render artists, photo-rich and high-end.",
+        base + "\n\nComposition: editorial presentation board, very premium, deeply cinematic, dramatic lighting and elegant spacing.",
+    ]
+
+    return variations[: max(1, min(count, len(variations)))]
 
 def sync_create_visual_asset(
     project: Dict[str, Any],
@@ -1158,15 +1377,23 @@ def sync_create_visual_asset(
     size: str = "1536x1024",
     quality: str = "high",
 ) -> Dict[str, Any]:
-    data_url = generate_image_data_url(prompt, size=size, quality=quality)
-    if not data_url:
-        raise HTTPException(status_code=500, detail="Image generation failed")
+    image_payload = generate_image_data_url(
+        prompt=prompt,
+        size=size,
+        quality=quality,
+    )
 
-    if data_url.startswith("data:image"):
-        rel, public_url = persist_data_url_image(data_url, RENDER_OUTPUT_DIR, safe_filename(asset_type))
-    else:
-        public_url = data_url
-        rel = data_url
+    if not image_payload:
+        raise HTTPException(
+            status_code=500,
+            detail="Image generation failed: empty image payload",
+        )
+
+    storage_path, public_url = persist_data_url_image(
+        image_payload,
+        RENDER_OUTPUT_DIR,
+        safe_filename(asset_type),
+    )
 
     asset = create_project_asset(
         str(project["id"]),
@@ -1181,18 +1408,33 @@ def sync_create_visual_asset(
         master_url=public_url,
         print_url=public_url,
         source_file_url=public_url,
-        meta={"saved_path": rel, "size": size, "quality": quality},
+        meta={
+            "storage_path": storage_path,
+            "storage_bucket": SUPABASE_STORAGE_BUCKET,
+            "size": size,
+            "quality": quality,
+            "image_model": (
+                os.getenv("OPENAI_IMAGE_MODEL")
+                or os.getenv("IMAGE_MODEL")
+                or IMAGE_MODEL
+            ),
+        },
     )
+
     add_project_activity(
         str(project["id"]),
         user_id,
         "asset.generated",
         title,
         detail=f"{asset_type} generated",
-        meta={"asset_id": asset["id"]},
+        meta={
+            "asset_id": asset["id"],
+            "storage_path": storage_path,
+            "storage_bucket": SUPABASE_STORAGE_BUCKET,
+        },
     )
-    return asset
 
+    return asset
 
 def create_separate_render_view_assets(
     project: Dict[str, Any],
