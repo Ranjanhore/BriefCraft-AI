@@ -208,17 +208,53 @@ def absolute_public_url(relative_url: str) -> str:
 
 def relative_public_url(path: Path) -> str:
     path = path.resolve()
+
+    # --------------------------------------------------------------------------
+    # CRITICAL FIX:
+    # Never return Render-local /renders URLs for generated files.
+    # Render local disk is temporary and causes 404.
+    # --------------------------------------------------------------------------
+    try:
+        path.relative_to(RENDER_OUTPUT_DIR)
+
+        if path.exists() and path.is_file():
+            import mimetypes
+            import time
+
+            content_type = mimetypes.guess_type(str(path))[0] or "image/png"
+            ext = path.suffix or ".png"
+            clean_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", path.stem).strip("-._") or "render"
+
+            storage_path = (
+                f"projects/shared/renders/"
+                f"{int(time.time())}-{uuid.uuid4().hex[:10]}-{clean_name}{ext}"
+            )
+
+            public_url = _upload_image_bytes_to_supabase(
+                image_bytes=path.read_bytes(),
+                storage_path=storage_path,
+                content_type=content_type,
+            )
+
+            return public_url
+
+        raise RuntimeError(f"Render output file does not exist: {path}")
+
+    except ValueError:
+        # Not inside RENDER_OUTPUT_DIR, continue normal public URL handling.
+        pass
+
     for root, prefix in (
         (MEDIA_DIR, "/media"),
         (UPLOAD_DIR, "/uploads"),
         (EXPORT_DIR, "/exports"),
-        (RENDER_OUTPUT_DIR, "/renders"),
     ):
         try:
             rel = path.relative_to(root)
             return f"{prefix}/{str(rel).replace(os.sep, '/')}"
         except Exception:
             continue
+
     return str(path)
 
 
@@ -1390,10 +1426,10 @@ def sync_create_visual_asset(
         )
 
     storage_path, public_url = persist_data_url_image(
-        image_payload,
-        RENDER_OUTPUT_DIR,
-        safe_filename(asset_type),
-    )
+    image_payload,
+    RENDER_OUTPUT_DIR,
+    safe_filename(asset_type),
+)
 
     asset = create_project_asset(
         str(project["id"]),
@@ -1405,9 +1441,9 @@ def sync_create_visual_asset(
         job_kind=job_kind or "sync_generation",
         status="completed",
         preview_url=public_url,
-        master_url=public_url,
-        print_url=public_url,
-        source_file_url=public_url,
+master_url=public_url,
+print_url=public_url,
+source_file_url=public_url,
         meta={
             "storage_path": storage_path,
             "storage_bucket": SUPABASE_STORAGE_BUCKET,
