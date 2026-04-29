@@ -5176,12 +5176,49 @@ Style requirements:
             "explanation": "Shows how guests feel inside the experience and why the mood suits the selected concept.",
             "prompt": base + "\nFocus on immersive guest experience, lounge ambience, hospitality zones, warm premium celebration mood.",
         },
+        {
+            "title": f"{title} — Hero Detail Mood",
+            "explanation": "Highlights premium focal details, finishes, lighting accents, and branded atmosphere.",
+            "prompt": base + "\nFocus on close-up premium details, refined decor, stage materials, lighting texture, cinematic brand atmosphere.",
+        },
+        {
+            "title": f"{title} — Production Design Direction",
+            "explanation": "Shows the production-ready design language for render artists and event designers.",
+            "prompt": base + "\nFocus on production design references, scenic layers, LED language, spatial composition, event visualization quality.",
+        },
     ]
+
+
+def _asset_image_url(row: Dict[str, Any]) -> Optional[str]:
+    return (
+        row.get("preview_url")
+        or row.get("master_url")
+        or row.get("print_url")
+        or row.get("source_file_url")
+        or row.get("public_url")
+        or row.get("image_url")
+    )
 
 
 @app.post("/api/moodboard/generate")
 def generate_project_moodboard(payload: MoodboardGenerateRequest):
     project_id = ensure_uuid(payload.project_id, "project_id")
+
+    project = db_get("projects", id=project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    asset_user_id = (
+        project.get("user_id")
+        or project.get("owner_id")
+        or project.get("created_by")
+    )
+
+    if not asset_user_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Project has no user_id/owner_id/created_by, cannot save moodboard asset.",
+        )
 
     count = max(1, min(int(payload.count or 4), 6))
     prompt_pack = _moodboard_prompt_pack(payload)[:count]
@@ -5205,9 +5242,12 @@ def generate_project_moodboard(payload: MoodboardGenerateRequest):
             "project_assets",
             {
                 "project_id": project_id,
+                "user_id": asset_user_id,
                 "asset_type": "moodboard",
                 "section": "moodboard",
+                "job_kind": "concept_moodboard",
                 "title": item["title"],
+                "prompt": item["prompt"],
                 "status": "completed",
                 "preview_url": public_url,
                 "master_url": public_url,
@@ -5226,11 +5266,19 @@ def generate_project_moodboard(payload: MoodboardGenerateRequest):
                     "concept_id": payload.concept_id,
                     "concept_title": payload.concept_title,
                     "index": index,
+                    "storage_path": storage_path,
+                    "storage_bucket": SUPABASE_STORAGE_BUCKET,
                 },
             },
         )
 
+        asset["image_url"] = _asset_image_url(asset) or public_url
         created_assets.append(asset)
+
+    try:
+        update_project_media_rollups(project_id, asset_user_id)
+    except Exception as e:
+        print("Moodboard media rollup update failed:", repr(e))
 
     return {
         "ok": True,
@@ -5253,15 +5301,10 @@ def list_project_moodboard(project_id: str):
         project_id=project_id,
     )
 
-    assets = []
+    assets: List[Dict[str, Any]] = []
     for row in rows:
         if row.get("asset_type") == "moodboard" or row.get("section") == "moodboard":
-            image_url = (
-                row.get("preview_url")
-                or row.get("master_url")
-                or row.get("print_url")
-                or row.get("source_file_url")
-            )
+            image_url = _asset_image_url(row)
             if image_url:
                 row["image_url"] = image_url
                 assets.append(row)
@@ -5273,3 +5316,4 @@ def list_project_moodboard(project_id: str):
         "count": len(assets),
         "assets": assets,
     }
+
