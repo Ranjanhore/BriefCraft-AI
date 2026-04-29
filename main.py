@@ -5105,3 +5105,171 @@ def ucd_create_review_snapshot(
         "message": "Review snapshot saved.",
         "snapshot": row,
     }
+
+# existing main.py code above...
+
+# ---------------------------------------------------------------------------
+# Moodboard generation API
+# ---------------------------------------------------------------------------
+
+class MoodboardGenerateRequest(BaseModel):
+    project_id: str
+    brief: Optional[str] = ""
+    concept_id: Optional[str] = ""
+    concept_title: Optional[str] = ""
+    concept_summary: Optional[str] = ""
+    concept: Optional[Dict[str, Any]] = None
+    count: int = 4
+
+
+def _moodboard_prompt_pack(payload: MoodboardGenerateRequest) -> List[Dict[str, str]]:
+    concept = payload.concept or {}
+    title = (
+        payload.concept_title
+        or concept.get("title")
+        or concept.get("name")
+        or "Selected Event Concept"
+    )
+    summary = (
+        payload.concept_summary
+        or concept.get("summary")
+        or concept.get("description")
+        or payload.brief
+        or ""
+    )
+
+    base = f"""
+Create a premium event moodboard image for this concept.
+
+Concept title: {title}
+Concept summary: {summary}
+Brief: {payload.brief}
+
+Style requirements:
+- real visual mood board image, not text-only
+- cinematic luxury event design
+- premium stage, entrance, lighting, materials, atmosphere
+- no written text, no labels, no logo, no watermark
+- no gradient placeholder, no abstract flat card
+- realistic 3D/event design photography look
+- landscape composition suitable for 16:9 frontend display
+""".strip()
+
+    return [
+        {
+            "title": f"{title} — Spatial Atmosphere",
+            "explanation": "Shows the overall venue mood, scale, lighting, and premium environment direction.",
+            "prompt": base + "\nFocus on full venue atmosphere, entrance vista, guest arrival energy, wide cinematic composition.",
+        },
+        {
+            "title": f"{title} — Stage & Focal Moment",
+            "explanation": "Defines the hero stage language and the main visual moment for the concept.",
+            "prompt": base + "\nFocus on stage design, LED backdrop, layered scenic elements, lighting beams, hero presentation moment.",
+        },
+        {
+            "title": f"{title} — Materials & Decor Palette",
+            "explanation": "Captures the material mood, textures, floral/decor details, and premium finish.",
+            "prompt": base + "\nFocus on luxury materials, decor textures, furniture, floral accents, metallic details, ambient light.",
+        },
+        {
+            "title": f"{title} — Guest Experience Mood",
+            "explanation": "Shows how guests feel inside the experience and why the mood suits the selected concept.",
+            "prompt": base + "\nFocus on immersive guest experience, lounge ambience, hospitality zones, warm premium celebration mood.",
+        },
+    ]
+
+
+@app.post("/api/moodboard/generate")
+def generate_project_moodboard(payload: MoodboardGenerateRequest):
+    project_id = ensure_uuid(payload.project_id, "project_id")
+
+    count = max(1, min(int(payload.count or 4), 6))
+    prompt_pack = _moodboard_prompt_pack(payload)[:count]
+
+    created_assets: List[Dict[str, Any]] = []
+
+    for index, item in enumerate(prompt_pack, start=1):
+        image_payload = generate_image_data_url(
+            item["prompt"],
+            size="1536x1024",
+            quality="medium",
+        )
+
+        storage_path, public_url = persist_data_url_image(
+            image_payload,
+            RENDER_OUTPUT_DIR,
+            f"moodboard-{project_id}-{index}",
+        )
+
+        asset = db_insert(
+            "project_assets",
+            {
+                "project_id": project_id,
+                "asset_type": "moodboard",
+                "section": "moodboard",
+                "title": item["title"],
+                "status": "completed",
+                "preview_url": public_url,
+                "master_url": public_url,
+                "print_url": public_url,
+                "source_file_url": public_url,
+                "output_data": {
+                    "prompt": item["prompt"],
+                    "explanation": item["explanation"],
+                    "storage_path": storage_path,
+                    "public_url": public_url,
+                    "aspect_display": "16:9",
+                    "image_size": "1536x1024",
+                },
+                "meta": {
+                    "generated_by": "moodboard_generate_api",
+                    "concept_id": payload.concept_id,
+                    "concept_title": payload.concept_title,
+                    "index": index,
+                },
+            },
+        )
+
+        created_assets.append(asset)
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "section": "moodboard",
+        "count": len(created_assets),
+        "assets": created_assets,
+    }
+
+
+@app.get("/api/projects/{project_id}/moodboard")
+def list_project_moodboard(project_id: str):
+    project_id = ensure_uuid(project_id, "project_id")
+
+    rows = db_list(
+        "project_assets",
+        limit=100,
+        order_key="created_at",
+        desc=True,
+        project_id=project_id,
+    )
+
+    assets = []
+    for row in rows:
+        if row.get("asset_type") == "moodboard" or row.get("section") == "moodboard":
+            image_url = (
+                row.get("preview_url")
+                or row.get("master_url")
+                or row.get("print_url")
+                or row.get("source_file_url")
+            )
+            if image_url:
+                row["image_url"] = image_url
+                assets.append(row)
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "section": "moodboard",
+        "count": len(assets),
+        "assets": assets,
+    }
