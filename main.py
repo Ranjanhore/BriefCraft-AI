@@ -5317,3 +5317,889 @@ def list_project_moodboard(project_id: str):
         "assets": assets,
     }
 
+# ==============================================================================
+# CAD BACKEND V3 PATCH - Professional DXF/SVG/PDF generator
+# Paste this block at the very bottom of main.py, after all existing routes.
+# ==============================================================================
+
+import math as _cad_v3_math
+import mimetypes as _cad_v3_mimetypes
+import time as _cad_v3_time
+from typing import Any as _CadV3Any, Dict as _CadV3Dict, List as _CadV3List, Optional as _CadV3Optional, Tuple as _CadV3Tuple
+
+from fastapi import File as _CadV3File, Form as _CadV3Form, UploadFile as _CadV3UploadFile
+from pydantic import BaseModel as _CadV3BaseModel, Field as _CadV3Field
+
+
+class CadV3GenerateRequest(_CadV3BaseModel):
+    project_id: _CadV3Optional[str] = _CadV3Field(default="demo-cad-project")
+    title: _CadV3Optional[str] = _CadV3Field(default="BriefCraft CAD Layout V3")
+    brief: _CadV3Optional[str] = _CadV3Field(default="")
+    concept: _CadV3Optional[str] = _CadV3Field(default="")
+    unit: str = _CadV3Field(default="meters")
+    width: _CadV3Optional[float] = None
+    height: _CadV3Optional[float] = None
+    venue_width: _CadV3Optional[float] = None
+    venue_height: _CadV3Optional[float] = None
+    audience_count: _CadV3Optional[int] = None
+    include_svg: bool = True
+    include_pdf: bool = True
+    include_dxf: bool = True
+    notes: _CadV3Optional[str] = ""
+
+
+_CAD_V3_LAYER_COLORS: _CadV3Dict[str, int] = {
+    "BC_TITLE_BLOCK": 7,
+    "BC_VENUE_BOUNDARY": 8,
+    "BC_STAGE": 1,
+    "BC_LED_SCREEN": 5,
+    "BC_AUDIENCE": 3,
+    "BC_VIP": 2,
+    "BC_FOH": 4,
+    "BC_BOH": 6,
+    "BC_CHAIRS": 30,
+    "BC_POWER": 1,
+    "BC_CAMERA": 5,
+    "BC_CABLE_SIGNAL": 6,
+    "BC_DIMENSIONS": 7,
+    "BC_TEXT": 7,
+    "BC_GRID": 9,
+}
+
+
+def _cad_v3_safe_name(value: _CadV3Any, fallback: str = "cad") -> str:
+    value = str(value or fallback).strip().lower()
+    value = re.sub(r"[^a-z0-9._-]+", "-", value)
+    value = re.sub(r"-+", "-", value).strip("-._")
+    return value or fallback
+
+
+def _cad_v3_num(value: _CadV3Any, default: float) -> float:
+    try:
+        if value is None or value == "":
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _cad_v3_int(value: _CadV3Any, default: int) -> int:
+    try:
+        if value is None or value == "":
+            return int(default)
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _cad_v3_unit_name(unit: str) -> str:
+    raw = str(unit or "meters").strip().lower()
+    if raw in {"m", "meter", "metre", "meters", "metres"}:
+        return "meters"
+    if raw in {"mm", "millimeter", "millimetre", "millimeters", "millimetres"}:
+        return "millimeters"
+    if raw in {"ft", "feet", "foot"}:
+        return "feet"
+    return "meters"
+
+
+def _cad_v3_unit_suffix(unit: str) -> str:
+    return {"meters": "m", "millimeters": "mm", "feet": "ft"}.get(_cad_v3_unit_name(unit), "m")
+
+
+def _cad_v3_insunits(unit: str) -> int:
+    # AutoCAD INSUNITS: 4=millimeters, 6=meters, 2=feet
+    return {"millimeters": 4, "meters": 6, "feet": 2}.get(_cad_v3_unit_name(unit), 6)
+
+
+def _cad_v3_parse_brief_dimensions(brief: str) -> _CadV3Tuple[_CadV3Optional[float], _CadV3Optional[float], _CadV3Optional[int]]:
+    text = str(brief or "")
+    width = None
+    height = None
+    audience = None
+
+    dim_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|meter|metre|ft|feet)?\s*[x×]\s*(\d+(?:\.\d+)?)", text, re.I)
+    if dim_match:
+        width = float(dim_match.group(1))
+        height = float(dim_match.group(2))
+
+    aud_match = re.search(r"(\d{2,6})\s*(?:pax|people|guests|audience|chairs|seats|seating)", text, re.I)
+    if aud_match:
+        audience = int(aud_match.group(1))
+
+    return width, height, audience
+
+
+def _cad_v3_rect(x: float, y: float, w: float, h: float, layer: str, label: str, kind: str = "zone") -> _CadV3Dict[str, _CadV3Any]:
+    return {
+        "id": f"{kind}_{_cad_v3_safe_name(label)}_{uuid.uuid4().hex[:6]}",
+        "type": "rect",
+        "kind": kind,
+        "label": label,
+        "layer": layer,
+        "x": round(float(x), 3),
+        "y": round(float(y), 3),
+        "w": round(float(w), 3),
+        "h": round(float(h), 3),
+    }
+
+
+def _cad_v3_line(x1: float, y1: float, x2: float, y2: float, layer: str, label: str, kind: str = "line") -> _CadV3Dict[str, _CadV3Any]:
+    return {
+        "id": f"{kind}_{_cad_v3_safe_name(label)}_{uuid.uuid4().hex[:6]}",
+        "type": "line",
+        "kind": kind,
+        "label": label,
+        "layer": layer,
+        "x1": round(float(x1), 3),
+        "y1": round(float(y1), 3),
+        "x2": round(float(x2), 3),
+        "y2": round(float(y2), 3),
+    }
+
+
+def _cad_v3_text(x: float, y: float, text: str, layer: str = "BC_TEXT", height: float = 0.38, kind: str = "text") -> _CadV3Dict[str, _CadV3Any]:
+    return {
+        "id": f"{kind}_{uuid.uuid4().hex[:6]}",
+        "type": "text",
+        "kind": kind,
+        "label": text,
+        "text": text,
+        "layer": layer,
+        "x": round(float(x), 3),
+        "y": round(float(y), 3),
+        "height": round(float(height), 3),
+    }
+
+
+def _cad_v3_insert(block: str, x: float, y: float, layer: str, label: str, rotation: float = 0.0, scale: float = 1.0, kind: str = "symbol") -> _CadV3Dict[str, _CadV3Any]:
+    return {
+        "id": f"{kind}_{_cad_v3_safe_name(label)}_{uuid.uuid4().hex[:6]}",
+        "type": "insert",
+        "kind": kind,
+        "label": label,
+        "block": block,
+        "layer": layer,
+        "x": round(float(x), 3),
+        "y": round(float(y), 3),
+        "rotation": round(float(rotation), 3),
+        "scale": round(float(scale), 3),
+    }
+
+
+def _cad_v3_build_layout(payload: CadV3GenerateRequest) -> _CadV3Dict[str, _CadV3Any]:
+    brief = str(payload.brief or "")
+    parsed_w, parsed_h, parsed_audience = _cad_v3_parse_brief_dimensions(brief)
+    unit = _cad_v3_unit_name(payload.unit)
+    unit_s = _cad_v3_unit_suffix(unit)
+
+    w = _cad_v3_num(payload.venue_width or payload.width or parsed_w, 36.0)
+    h = _cad_v3_num(payload.venue_height or payload.height or parsed_h, 22.0)
+    w = max(18.0, min(w, 180.0))
+    h = max(12.0, min(h, 120.0))
+    audience = max(20, min(_cad_v3_int(payload.audience_count or parsed_audience, 300), 1200))
+
+    title = str(payload.title or "BriefCraft CAD Layout V3")
+    project_id = str(payload.project_id or "demo-cad-project")
+
+    stage = _cad_v3_rect(w * 0.055, h * 0.31, w * 0.205, h * 0.38, "BC_STAGE", "STAGE", "stage")
+    led = _cad_v3_rect(stage["x"] + stage["w"] * 0.06, stage["y"] + stage["h"] - max(0.65, h * 0.035), stage["w"] * 0.88, max(0.55, h * 0.028), "BC_LED_SCREEN", "LED SCREEN", "led")
+    vip = _cad_v3_rect(w * 0.285, h * 0.36, w * 0.105, h * 0.28, "BC_VIP", "VIP SEATING", "vip")
+    audience_zone = _cad_v3_rect(w * 0.41, h * 0.16, w * 0.35, h * 0.68, "BC_AUDIENCE", "AUDIENCE SEATING", "audience")
+    foh = _cad_v3_rect(w * 0.80, h * 0.41, w * 0.075, h * 0.18, "BC_FOH", "FOH CONTROL", "foh")
+    boh = _cad_v3_rect(w * 0.045, h * 0.075, w * 0.18, h * 0.14, "BC_BOH", "BOH / GREEN ROOM", "boh")
+    db = _cad_v3_insert("BC_POWER_DB", w * 0.90, h * 0.14, "BC_POWER", "MAIN POWER DB", 0, 1.15, "power")
+
+    objects: _CadV3List[_CadV3Dict[str, _CadV3Any]] = []
+    objects.append(_cad_v3_rect(0, 0, w, h, "BC_VENUE_BOUNDARY", "VENUE BOUNDARY", "boundary"))
+    objects.extend([stage, led, vip, audience_zone, foh, boh, db])
+
+    # Chairs: real INSERT references, capped for DXF performance but scheduled with full requested count.
+    seat_count_to_draw = min(audience, 520)
+    cols = max(4, int(_cad_v3_math.sqrt(seat_count_to_draw * audience_zone["w"] / max(audience_zone["h"], 1))))
+    rows = max(1, int(_cad_v3_math.ceil(seat_count_to_draw / cols)))
+    chair_dx = audience_zone["w"] / max(cols, 1)
+    chair_dy = audience_zone["h"] / max(rows, 1)
+    chair_scale = max(0.42, min(0.72, min(chair_dx, chair_dy) * 0.75))
+    drawn = 0
+    for r in range(rows):
+        for c in range(cols):
+            if drawn >= seat_count_to_draw:
+                break
+            x = audience_zone["x"] + chair_dx * (c + 0.5)
+            y = audience_zone["y"] + chair_dy * (r + 0.5)
+            objects.append(_cad_v3_insert("BC_CHAIR", x, y, "BC_CHAIRS", f"Chair {drawn + 1}", 0, chair_scale, "chair"))
+            drawn += 1
+        if drawn >= seat_count_to_draw:
+            break
+
+    # Cameras and technical symbols.
+    cameras = [
+        _cad_v3_insert("BC_CAMERA", foh["x"] + foh["w"] * 0.5, foh["y"] + foh["h"] + h * 0.06, "BC_CAMERA", "CAM-1 CENTER", 180, 1.0, "camera"),
+        _cad_v3_insert("BC_CAMERA", w * 0.32, h * 0.82, "BC_CAMERA", "CAM-2 LEFT", 220, 1.0, "camera"),
+        _cad_v3_insert("BC_CAMERA", w * 0.32, h * 0.18, "BC_CAMERA", "CAM-3 RIGHT", 140, 1.0, "camera"),
+    ]
+    objects.extend(cameras)
+
+    cable_routes = [
+        _cad_v3_line(db["x"], db["y"], stage["x"] + stage["w"] * 0.5, stage["y"], "BC_CABLE_SIGNAL", "POWER TO STAGE", "cable"),
+        _cad_v3_line(db["x"], db["y"], led["x"] + led["w"] * 0.5, led["y"], "BC_CABLE_SIGNAL", "POWER TO LED", "cable"),
+        _cad_v3_line(foh["x"], foh["y"], led["x"] + led["w"], led["y"], "BC_CABLE_SIGNAL", "FOH SIGNAL TO LED", "signal"),
+        _cad_v3_line(foh["x"], foh["y"] + foh["h"], stage["x"] + stage["w"], stage["y"] + stage["h"] * 0.5, "BC_CABLE_SIGNAL", "AUDIO / COMMS ROUTE", "signal"),
+    ]
+    objects.extend(cable_routes)
+
+    # Dimension graphics as CAD-readable LINE + TEXT entities.
+    dim_offset = max(0.9, h * 0.045)
+    objects.append(_cad_v3_line(0, -dim_offset, w, -dim_offset, "BC_DIMENSIONS", "VENUE WIDTH DIM", "dimension"))
+    objects.append(_cad_v3_line(0, -dim_offset * 1.25, 0, 0, "BC_DIMENSIONS", "WIDTH LEFT EXT", "dimension"))
+    objects.append(_cad_v3_line(w, -dim_offset * 1.25, w, 0, "BC_DIMENSIONS", "WIDTH RIGHT EXT", "dimension"))
+    objects.append(_cad_v3_text(w * 0.45, -dim_offset * 1.5, f"Venue width: {w:g}{unit_s}", "BC_DIMENSIONS", max(0.32, h * 0.018), "dimension_text"))
+    objects.append(_cad_v3_line(-dim_offset, 0, -dim_offset, h, "BC_DIMENSIONS", "VENUE HEIGHT DIM", "dimension"))
+    objects.append(_cad_v3_line(-dim_offset * 1.25, 0, 0, 0, "BC_DIMENSIONS", "HEIGHT BOTTOM EXT", "dimension"))
+    objects.append(_cad_v3_line(-dim_offset * 1.25, h, 0, h, "BC_DIMENSIONS", "HEIGHT TOP EXT", "dimension"))
+    objects.append(_cad_v3_text(-dim_offset * 1.8, h * 0.48, f"Venue depth: {h:g}{unit_s}", "BC_DIMENSIONS", max(0.32, h * 0.018), "dimension_text"))
+
+    # Labels.
+    for rect in [stage, led, vip, audience_zone, foh, boh]:
+        objects.append(_cad_v3_text(rect["x"] + 0.25, rect["y"] + rect["h"] * 0.52, rect["label"], rect["layer"], max(0.32, h * 0.018), "label"))
+    objects.append(_cad_v3_text(db["x"] + 0.65, db["y"] + 0.15, "MAIN DB", "BC_POWER", max(0.28, h * 0.016), "label"))
+    for cam in cameras:
+        objects.append(_cad_v3_text(cam["x"] + 0.45, cam["y"] + 0.2, cam["label"], "BC_CAMERA", max(0.28, h * 0.016), "label"))
+
+    element_list = [
+        {"name": "Stage", "qty": 1, "layer": "BC_STAGE", "size": f"{stage['w']:g} x {stage['h']:g} {unit_s}"},
+        {"name": "LED screen", "qty": 1, "layer": "BC_LED_SCREEN", "size": f"{led['w']:g} x {led['h']:g} {unit_s}"},
+        {"name": "Audience chairs", "qty": audience, "layer": "BC_CHAIRS", "size": "symbol insert"},
+        {"name": "VIP zone", "qty": 1, "layer": "BC_VIP", "size": f"{vip['w']:g} x {vip['h']:g} {unit_s}"},
+        {"name": "FOH control", "qty": 1, "layer": "BC_FOH", "size": f"{foh['w']:g} x {foh['h']:g} {unit_s}"},
+        {"name": "BOH", "qty": 1, "layer": "BC_BOH", "size": f"{boh['w']:g} x {boh['h']:g} {unit_s}"},
+        {"name": "Camera positions", "qty": 3, "layer": "BC_CAMERA", "size": "symbol insert"},
+        {"name": "Main power DB", "qty": 1, "layer": "BC_POWER", "size": "symbol insert"},
+    ]
+    power_schedule = [
+        {"circuit": "P-01", "load": "LED wall + processor", "source": "Main DB", "route": "DB to LED", "status": "planned"},
+        {"circuit": "P-02", "load": "Stage lighting / truss", "source": "Main DB", "route": "DB to stage", "status": "planned"},
+        {"circuit": "S-01", "load": "FOH video signal", "source": "FOH", "route": "FOH to LED", "status": "planned"},
+        {"circuit": "A-01", "load": "Audio / comms", "source": "FOH", "route": "FOH to stage", "status": "planned"},
+    ]
+
+    return {
+        "version": "CAD_V3",
+        "project_id": project_id,
+        "title": title,
+        "unit": unit,
+        "unit_suffix": unit_s,
+        "venue": {"width": round(w, 3), "height": round(h, 3), "area": round(w * h, 3)},
+        "audience_count_requested": audience,
+        "audience_symbols_drawn": seat_count_to_draw,
+        "brief": brief,
+        "concept": str(payload.concept or ""),
+        "layers": _CAD_V3_LAYER_COLORS,
+        "objects": objects,
+        "element_list": element_list,
+        "power_schedule": power_schedule,
+        "notes": str(payload.notes or ""),
+        "created_at": now_iso(),
+    }
+
+
+def _cad_v3_dxf_pair(code: int, value: _CadV3Any) -> str:
+    if isinstance(value, float):
+        value = round(value, 6)
+    return f"{code}\n{value}\n"
+
+
+def _cad_v3_dxf_escape(text: _CadV3Any) -> str:
+    return str(text or "").replace("\r", " ").replace("\n", "\\P")[:900]
+
+
+def _cad_v3_dxf_lwpolyline(points: _CadV3List[_CadV3Tuple[float, float]], layer: str, closed: bool = True) -> _CadV3List[str]:
+    out = [
+        _cad_v3_dxf_pair(0, "LWPOLYLINE"),
+        _cad_v3_dxf_pair(8, layer),
+        _cad_v3_dxf_pair(90, len(points)),
+        _cad_v3_dxf_pair(70, 1 if closed else 0),
+    ]
+    for x, y in points:
+        out.append(_cad_v3_dxf_pair(10, float(x)))
+        out.append(_cad_v3_dxf_pair(20, float(y)))
+    return out
+
+
+def _cad_v3_dxf_rect(obj: _CadV3Dict[str, _CadV3Any]) -> _CadV3List[str]:
+    x, y, w, h = float(obj["x"]), float(obj["y"]), float(obj["w"]), float(obj["h"])
+    return _cad_v3_dxf_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], str(obj.get("layer") or "0"), True)
+
+
+def _cad_v3_dxf_line(obj: _CadV3Dict[str, _CadV3Any]) -> _CadV3List[str]:
+    return [
+        _cad_v3_dxf_pair(0, "LINE"),
+        _cad_v3_dxf_pair(8, obj.get("layer") or "0"),
+        _cad_v3_dxf_pair(10, float(obj.get("x1", 0))),
+        _cad_v3_dxf_pair(20, float(obj.get("y1", 0))),
+        _cad_v3_dxf_pair(30, 0),
+        _cad_v3_dxf_pair(11, float(obj.get("x2", 0))),
+        _cad_v3_dxf_pair(21, float(obj.get("y2", 0))),
+        _cad_v3_dxf_pair(31, 0),
+    ]
+
+
+def _cad_v3_dxf_text(obj: _CadV3Dict[str, _CadV3Any]) -> _CadV3List[str]:
+    return [
+        _cad_v3_dxf_pair(0, "TEXT"),
+        _cad_v3_dxf_pair(8, obj.get("layer") or "BC_TEXT"),
+        _cad_v3_dxf_pair(10, float(obj.get("x", 0))),
+        _cad_v3_dxf_pair(20, float(obj.get("y", 0))),
+        _cad_v3_dxf_pair(30, 0),
+        _cad_v3_dxf_pair(40, float(obj.get("height", 0.35))),
+        _cad_v3_dxf_pair(1, _cad_v3_dxf_escape(obj.get("text") or obj.get("label") or "")),
+        _cad_v3_dxf_pair(7, "STANDARD"),
+    ]
+
+
+def _cad_v3_dxf_mtext(x: float, y: float, width: float, height: float, text: str, layer: str = "BC_TEXT") -> _CadV3List[str]:
+    return [
+        _cad_v3_dxf_pair(0, "MTEXT"),
+        _cad_v3_dxf_pair(8, layer),
+        _cad_v3_dxf_pair(10, float(x)),
+        _cad_v3_dxf_pair(20, float(y)),
+        _cad_v3_dxf_pair(30, 0),
+        _cad_v3_dxf_pair(40, float(height)),
+        _cad_v3_dxf_pair(41, float(width)),
+        _cad_v3_dxf_pair(71, 1),
+        _cad_v3_dxf_pair(1, _cad_v3_dxf_escape(text)),
+    ]
+
+
+def _cad_v3_dxf_insert(obj: _CadV3Dict[str, _CadV3Any]) -> _CadV3List[str]:
+    scale = float(obj.get("scale", 1) or 1)
+    return [
+        _cad_v3_dxf_pair(0, "INSERT"),
+        _cad_v3_dxf_pair(8, obj.get("layer") or "0"),
+        _cad_v3_dxf_pair(2, obj.get("block") or "BC_SYMBOL"),
+        _cad_v3_dxf_pair(10, float(obj.get("x", 0))),
+        _cad_v3_dxf_pair(20, float(obj.get("y", 0))),
+        _cad_v3_dxf_pair(30, 0),
+        _cad_v3_dxf_pair(41, scale),
+        _cad_v3_dxf_pair(42, scale),
+        _cad_v3_dxf_pair(43, 1),
+        _cad_v3_dxf_pair(50, float(obj.get("rotation", 0) or 0)),
+    ]
+
+
+def _cad_v3_dxf_blocks() -> _CadV3List[str]:
+    out: _CadV3List[str] = []
+
+    def start_block(name: str, layer: str) -> None:
+        out.extend([
+            _cad_v3_dxf_pair(0, "BLOCK"),
+            _cad_v3_dxf_pair(8, layer),
+            _cad_v3_dxf_pair(2, name),
+            _cad_v3_dxf_pair(70, 0),
+            _cad_v3_dxf_pair(10, 0),
+            _cad_v3_dxf_pair(20, 0),
+            _cad_v3_dxf_pair(30, 0),
+            _cad_v3_dxf_pair(3, name),
+        ])
+
+    def end_block() -> None:
+        out.extend([_cad_v3_dxf_pair(0, "ENDBLK"), _cad_v3_dxf_pair(8, "0")])
+
+    start_block("BC_CHAIR", "BC_CHAIRS")
+    out.extend(_cad_v3_dxf_lwpolyline([(-0.22, -0.18), (0.22, -0.18), (0.22, 0.16), (-0.22, 0.16)], "BC_CHAIRS", True))
+    out.extend([
+        _cad_v3_dxf_pair(0, "LINE"), _cad_v3_dxf_pair(8, "BC_CHAIRS"),
+        _cad_v3_dxf_pair(10, -0.24), _cad_v3_dxf_pair(20, 0.22), _cad_v3_dxf_pair(11, 0.24), _cad_v3_dxf_pair(21, 0.22),
+    ])
+    end_block()
+
+    start_block("BC_POWER_DB", "BC_POWER")
+    out.extend(_cad_v3_dxf_lwpolyline([(-0.35, -0.28), (0.35, -0.28), (0.35, 0.28), (-0.35, 0.28)], "BC_POWER", True))
+    out.extend(_cad_v3_dxf_mtext(-0.20, -0.08, 0.5, 0.16, "DB", "BC_POWER"))
+    end_block()
+
+    start_block("BC_CAMERA", "BC_CAMERA")
+    out.extend(_cad_v3_dxf_lwpolyline([(-0.25, -0.18), (0.20, 0), (-0.25, 0.18)], "BC_CAMERA", True))
+    out.extend([
+        _cad_v3_dxf_pair(0, "LINE"), _cad_v3_dxf_pair(8, "BC_CAMERA"),
+        _cad_v3_dxf_pair(10, 0.20), _cad_v3_dxf_pair(20, 0), _cad_v3_dxf_pair(11, 0.45), _cad_v3_dxf_pair(21, 0),
+    ])
+    end_block()
+
+    return out
+
+
+def _cad_v3_render_dxf(layout: _CadV3Dict[str, _CadV3Any]) -> str:
+    unit = str(layout.get("unit") or "meters")
+    venue = layout.get("venue") or {}
+    w = float(venue.get("width", 36))
+    h = float(venue.get("height", 22))
+    title_x = w + max(2.0, w * 0.05)
+    title_w = max(9.0, w * 0.22)
+
+    out: _CadV3List[str] = []
+    out.extend([
+        _cad_v3_dxf_pair(0, "SECTION"), _cad_v3_dxf_pair(2, "HEADER"),
+        _cad_v3_dxf_pair(9, "$ACADVER"), _cad_v3_dxf_pair(1, "AC1027"),
+        _cad_v3_dxf_pair(9, "$INSUNITS"), _cad_v3_dxf_pair(70, _cad_v3_insunits(unit)),
+        _cad_v3_dxf_pair(0, "ENDSEC"),
+    ])
+
+    out.extend([_cad_v3_dxf_pair(0, "SECTION"), _cad_v3_dxf_pair(2, "TABLES")])
+    out.extend([_cad_v3_dxf_pair(0, "TABLE"), _cad_v3_dxf_pair(2, "LAYER"), _cad_v3_dxf_pair(70, len(_CAD_V3_LAYER_COLORS) + 1)])
+    out.extend([_cad_v3_dxf_pair(0, "LAYER"), _cad_v3_dxf_pair(2, "0"), _cad_v3_dxf_pair(70, 0), _cad_v3_dxf_pair(62, 7), _cad_v3_dxf_pair(6, "CONTINUOUS")])
+    for layer, color in _CAD_V3_LAYER_COLORS.items():
+        out.extend([_cad_v3_dxf_pair(0, "LAYER"), _cad_v3_dxf_pair(2, layer), _cad_v3_dxf_pair(70, 0), _cad_v3_dxf_pair(62, color), _cad_v3_dxf_pair(6, "CONTINUOUS")])
+    out.extend([_cad_v3_dxf_pair(0, "ENDTAB"), _cad_v3_dxf_pair(0, "ENDSEC")])
+
+    out.extend([_cad_v3_dxf_pair(0, "SECTION"), _cad_v3_dxf_pair(2, "BLOCKS")])
+    out.extend(_cad_v3_dxf_blocks())
+    out.extend([_cad_v3_dxf_pair(0, "ENDSEC")])
+
+    out.extend([_cad_v3_dxf_pair(0, "SECTION"), _cad_v3_dxf_pair(2, "ENTITIES")])
+
+    for obj in layout.get("objects", []):
+        typ = obj.get("type")
+        if typ == "rect":
+            out.extend(_cad_v3_dxf_rect(obj))
+        elif typ == "line":
+            out.extend(_cad_v3_dxf_line(obj))
+        elif typ == "text":
+            out.extend(_cad_v3_dxf_text(obj))
+        elif typ == "insert":
+            out.extend(_cad_v3_dxf_insert(obj))
+
+    # Title block, power schedule, and element list inside DXF.
+    title_h = max(12.0, h * 0.72)
+    out.extend(_cad_v3_dxf_lwpolyline([(title_x, 0), (title_x + title_w, 0), (title_x + title_w, title_h), (title_x, title_h)], "BC_TITLE_BLOCK", True))
+    for y_ratio in [0.86, 0.73, 0.60, 0.47, 0.34, 0.21, 0.10]:
+        y = title_h * y_ratio
+        out.extend(_cad_v3_dxf_line({"layer": "BC_TITLE_BLOCK", "x1": title_x, "y1": y, "x2": title_x + title_w, "y2": y}))
+
+    title_text = (
+        f"BRIEFCRAFT-AI CAD V3\\P"
+        f"Project: {layout.get('project_id')}\\P"
+        f"Title: {layout.get('title')}\\P"
+        f"Venue: {w:g} x {h:g} {layout.get('unit_suffix')}\\P"
+        f"Audience: {layout.get('audience_count_requested')}"
+    )
+    out.extend(_cad_v3_dxf_mtext(title_x + 0.35, title_h - 0.75, title_w - 0.7, max(0.32, h * 0.018), title_text, "BC_TITLE_BLOCK"))
+
+    power_lines = ["POWER / SIGNAL SCHEDULE"]
+    for item in layout.get("power_schedule", []):
+        power_lines.append(f"{item.get('circuit')}: {item.get('load')} | {item.get('route')}")
+    out.extend(_cad_v3_dxf_mtext(title_x + 0.35, title_h * 0.58, title_w - 0.7, max(0.26, h * 0.014), "\\P".join(power_lines), "BC_TEXT"))
+
+    element_lines = ["ELEMENT LIST"]
+    for item in layout.get("element_list", []):
+        element_lines.append(f"{item.get('qty')}x {item.get('name')} - {item.get('size')}")
+    out.extend(_cad_v3_dxf_mtext(title_x + 0.35, title_h * 0.28, title_w - 0.7, max(0.24, h * 0.013), "\\P".join(element_lines), "BC_TEXT"))
+
+    out.extend([_cad_v3_dxf_pair(0, "ENDSEC"), _cad_v3_dxf_pair(0, "EOF")])
+    return "".join(out)
+
+
+def _cad_v3_svg_escape(value: _CadV3Any) -> str:
+    return str(value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _cad_v3_render_svg(layout: _CadV3Dict[str, _CadV3Any]) -> str:
+    venue = layout.get("venue") or {}
+    w = float(venue.get("width", 36))
+    h = float(venue.get("height", 22))
+    vb_w = 1600
+    vb_h = 900
+    margin = 70
+    title_w = 310
+    scale = min((vb_w - margin * 2 - title_w) / max(w, 1), (vb_h - margin * 2) / max(h, 1))
+
+    def sx(x: float) -> float:
+        return margin + x * scale
+
+    def sy(y: float) -> float:
+        return vb_h - margin - y * scale
+
+    def rect(obj: _CadV3Dict[str, _CadV3Any], css: str) -> str:
+        x = float(obj["x"]); y = float(obj["y"]); rw = float(obj["w"]); rh = float(obj["h"])
+        return f'<rect x="{sx(x):.2f}" y="{sy(y + rh):.2f}" width="{rw * scale:.2f}" height="{rh * scale:.2f}" class="{css}" />'
+
+    def line(obj: _CadV3Dict[str, _CadV3Any], css: str) -> str:
+        return f'<line x1="{sx(float(obj["x1"])):.2f}" y1="{sy(float(obj["y1"])):.2f}" x2="{sx(float(obj["x2"])):.2f}" y2="{sy(float(obj["y2"])):.2f}" class="{css}" />'
+
+    parts = [f'''<svg xmlns="http://www.w3.org/2000/svg" width="{vb_w}" height="{vb_h}" viewBox="0 0 {vb_w} {vb_h}">
+<style>
+.bg{{fill:#070911}} .grid{{stroke:#202433;stroke-width:1}} .boundary{{fill:none;stroke:#f6e7b1;stroke-width:3}} .stage{{fill:#301619;stroke:#ff6b6b;stroke-width:2}} .led{{fill:#10263f;stroke:#58a6ff;stroke-width:2}} .audience{{fill:#102a18;stroke:#76d275;stroke-width:2}} .vip{{fill:#2f2611;stroke:#ffd166;stroke-width:2}} .foh{{fill:#101e33;stroke:#80bfff;stroke-width:2}} .boh{{fill:#221832;stroke:#d0a5ff;stroke-width:2}} .chair{{fill:#d8c27c;stroke:#332c18;stroke-width:.6}} .power{{fill:#401414;stroke:#ff5757;stroke-width:2}} .camera{{fill:#101b32;stroke:#8fd3ff;stroke-width:2}} .cable{{stroke:#f6c453;stroke-width:3;stroke-dasharray:9 7;fill:none}} .dim{{stroke:#d9d9d9;stroke-width:1.4;fill:none}} .text{{fill:#f7f3dd;font-family:Arial,Helvetica,sans-serif;font-size:14px}} .small{{font-size:11px}} .title{{font-size:22px;font-weight:700}}
+</style>
+<rect class="bg" width="100%" height="100%"/>''']
+
+    # Background grid.
+    grid_step = max(1.0, round(min(w, h) / 10, 1))
+    gx = 0.0
+    while gx <= w:
+        parts.append(f'<line x1="{sx(gx):.2f}" y1="{sy(0):.2f}" x2="{sx(gx):.2f}" y2="{sy(h):.2f}" class="grid"/>')
+        gx += grid_step
+    gy = 0.0
+    while gy <= h:
+        parts.append(f'<line x1="{sx(0):.2f}" y1="{sy(gy):.2f}" x2="{sx(w):.2f}" y2="{sy(gy):.2f}" class="grid"/>')
+        gy += grid_step
+
+    css_by_kind = {"boundary": "boundary", "stage": "stage", "led": "led", "audience": "audience", "vip": "vip", "foh": "foh", "boh": "boh"}
+    for obj in layout.get("objects", []):
+        typ = obj.get("type")
+        kind = obj.get("kind")
+        if typ == "rect":
+            parts.append(rect(obj, css_by_kind.get(kind, "boundary")))
+        elif typ == "line":
+            parts.append(line(obj, "cable" if kind in {"cable", "signal"} else "dim"))
+        elif typ == "insert":
+            x = sx(float(obj.get("x", 0))); y = sy(float(obj.get("y", 0)))
+            if obj.get("block") == "BC_CHAIR":
+                s = max(4, float(obj.get("scale", 1)) * scale * 0.45)
+                parts.append(f'<rect x="{x - s / 2:.2f}" y="{y - s / 2:.2f}" width="{s:.2f}" height="{s:.2f}" rx="1.2" class="chair"/>')
+            elif obj.get("block") == "BC_POWER_DB":
+                parts.append(f'<rect x="{x - 9:.2f}" y="{y - 9:.2f}" width="18" height="18" class="power"/><text x="{x + 12:.2f}" y="{y + 4:.2f}" class="text small">DB</text>')
+            elif obj.get("block") == "BC_CAMERA":
+                parts.append(f'<polygon points="{x - 10:.2f},{y - 8:.2f} {x + 10:.2f},{y:.2f} {x - 10:.2f},{y + 8:.2f}" class="camera"/>')
+        elif typ == "text":
+            cls = "text small" if obj.get("kind") != "label" else "text"
+            parts.append(f'<text x="{sx(float(obj.get("x", 0))):.2f}" y="{sy(float(obj.get("y", 0))):.2f}" class="{cls}">{_cad_v3_svg_escape(obj.get("text") or obj.get("label"))}</text>')
+
+    tx = vb_w - title_w + 18
+    parts.append(f'<rect x="{vb_w - title_w}" y="0" width="{title_w}" height="{vb_h}" fill="#0d1018" stroke="#b99a4d"/>')
+    parts.append(f'<text x="{tx}" y="42" class="text title">BriefCraft CAD V3</text>')
+    parts.append(f'<text x="{tx}" y="72" class="text small">Project: {_cad_v3_svg_escape(layout.get("project_id"))}</text>')
+    parts.append(f'<text x="{tx}" y="94" class="text small">Venue: {w:g} x {h:g} {_cad_v3_svg_escape(layout.get("unit_suffix"))}</text>')
+    parts.append(f'<text x="{tx}" y="116" class="text small">Audience: {layout.get("audience_count_requested")}</text>')
+    parts.append(f'<text x="{tx}" y="152" class="text">Power Schedule</text>')
+    y = 176
+    for item in layout.get("power_schedule", []):
+        parts.append(f'<text x="{tx}" y="{y}" class="text small">{_cad_v3_svg_escape(item.get("circuit"))}: {_cad_v3_svg_escape(item.get("load"))}</text>')
+        y += 20
+    y += 22
+    parts.append(f'<text x="{tx}" y="{y}" class="text">Element List</text>')
+    y += 24
+    for item in layout.get("element_list", []):
+        parts.append(f'<text x="{tx}" y="{y}" class="text small">{item.get("qty")}x {_cad_v3_svg_escape(item.get("name"))}</text>')
+        y += 20
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _cad_v3_render_pdf(layout: _CadV3Dict[str, _CadV3Any], out_path: Path) -> None:
+    try:
+        from reportlab.lib.pagesizes import A3, landscape
+        from reportlab.pdfgen import canvas
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"reportlab is required for CAD PDF export: {exc}")
+
+    venue = layout.get("venue") or {}
+    w = float(venue.get("width", 36))
+    h = float(venue.get("height", 22))
+    c = canvas.Canvas(str(out_path), pagesize=landscape(A3))
+    page_w, page_h = landscape(A3)
+    margin = 34
+    title_w = 205
+    scale = min((page_w - margin * 2 - title_w) / max(w, 1), (page_h - margin * 2) / max(h, 1))
+
+    def px(x: float) -> float:
+        return margin + x * scale
+
+    def py(y: float) -> float:
+        return margin + y * scale
+
+    c.setTitle(str(layout.get("title") or "BriefCraft CAD V3"))
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(margin, page_h - 26, str(layout.get("title") or "BriefCraft CAD V3"))
+    c.setFont("Helvetica", 8)
+
+    # Grid.
+    c.setLineWidth(0.25)
+    grid_step = max(1.0, round(min(w, h) / 10, 1))
+    gx = 0.0
+    while gx <= w:
+        c.line(px(gx), py(0), px(gx), py(h))
+        gx += grid_step
+    gy = 0.0
+    while gy <= h:
+        c.line(px(0), py(gy), px(w), py(gy))
+        gy += grid_step
+
+    for obj in layout.get("objects", []):
+        typ = obj.get("type")
+        if typ == "rect":
+            c.setLineWidth(1.0 if obj.get("kind") != "boundary" else 1.8)
+            c.rect(px(float(obj["x"])), py(float(obj["y"])), float(obj["w"]) * scale, float(obj["h"]) * scale, stroke=1, fill=0)
+        elif typ == "line":
+            c.setLineWidth(0.8 if obj.get("kind") in {"dimension", "dimension_text"} else 1.1)
+            c.line(px(float(obj.get("x1", 0))), py(float(obj.get("y1", 0))), px(float(obj.get("x2", 0))), py(float(obj.get("y2", 0))))
+        elif typ == "insert":
+            x = px(float(obj.get("x", 0))); y = py(float(obj.get("y", 0)))
+            if obj.get("block") == "BC_CHAIR":
+                s = max(2.5, float(obj.get("scale", 1)) * scale * 0.45)
+                c.rect(x - s / 2, y - s / 2, s, s, stroke=1, fill=0)
+            elif obj.get("block") == "BC_POWER_DB":
+                c.rect(x - 5, y - 5, 10, 10, stroke=1, fill=0)
+                c.drawString(x + 7, y - 2, "DB")
+            elif obj.get("block") == "BC_CAMERA":
+                p = c.beginPath()
+                p.moveTo(x - 6, y - 5); p.lineTo(x + 7, y); p.lineTo(x - 6, y + 5); p.close()
+                c.drawPath(p, stroke=1, fill=0)
+        elif typ == "text":
+            c.setFont("Helvetica", max(5, min(10, float(obj.get("height", 0.35)) * scale * 0.5)))
+            c.drawString(px(float(obj.get("x", 0))), py(float(obj.get("y", 0))), str(obj.get("text") or obj.get("label") or "")[:80])
+
+    # Title block.
+    tx = page_w - title_w + 16
+    c.setLineWidth(1)
+    c.rect(page_w - title_w, margin, title_w - 18, page_h - margin * 2, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(tx, page_h - margin - 18, "BRIEFCRAFT-AI CAD V3")
+    c.setFont("Helvetica", 8)
+    lines = [
+        f"Project: {layout.get('project_id')}",
+        f"Venue: {w:g} x {h:g} {layout.get('unit_suffix')}",
+        f"Audience: {layout.get('audience_count_requested')}",
+        f"Generated: {layout.get('created_at')}",
+        "",
+        "POWER / SIGNAL SCHEDULE",
+    ]
+    for item in layout.get("power_schedule", []):
+        lines.append(f"{item.get('circuit')}: {item.get('load')}")
+    lines.extend(["", "ELEMENT LIST"])
+    for item in layout.get("element_list", []):
+        lines.append(f"{item.get('qty')}x {item.get('name')} - {item.get('size')}")
+
+    y = page_h - margin - 42
+    for line_text in lines:
+        c.drawString(tx, y, str(line_text)[:42])
+        y -= 12
+        if y < margin + 16:
+            break
+
+    c.showPage()
+    c.save()
+
+
+def _cad_v3_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _cad_v3_upload_public_file(path: Path, project_id: str, content_type: _CadV3Optional[str] = None) -> str:
+    content_type = content_type or _cad_v3_mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    try:
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+            import requests
+            storage_name = f"cad/v3/{_cad_v3_safe_name(project_id)}/{int(_cad_v3_time.time())}-{uuid.uuid4().hex[:10]}-{_cad_v3_safe_name(path.name)}"
+            upload_url = f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{storage_name}"
+            headers = {
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Content-Type": content_type,
+                "Cache-Control": "31536000",
+                "x-upsert": "true",
+            }
+            res = requests.post(upload_url, headers=headers, data=path.read_bytes(), timeout=120)
+            if res.status_code in (200, 201):
+                return f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/{storage_name}"
+            print("CAD V3 Supabase upload failed:", res.status_code, res.text[:400])
+    except Exception as exc:
+        print("CAD V3 public upload fallback:", repr(exc))
+
+    return absolute_public_url(relative_public_url(path))
+
+
+def _cad_v3_generate_files(layout: _CadV3Dict[str, _CadV3Any], include_svg: bool = True, include_pdf: bool = True, include_dxf: bool = True) -> _CadV3Dict[str, _CadV3Any]:
+    project_id = str(layout.get("project_id") or "demo-cad-project")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base_name = f"cad_v3_{_cad_v3_safe_name(project_id)}_{stamp}_{uuid.uuid4().hex[:8]}"
+    out_dir = CAD_DIR / _cad_v3_safe_name(project_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = out_dir / f"{base_name}.json"
+    _cad_v3_write_text(json_path, dump_json(layout))
+    urls: _CadV3Dict[str, _CadV3Any] = {
+        "json_path": str(json_path),
+        "json_url": _cad_v3_upload_public_file(json_path, project_id, "application/json"),
+    }
+
+    if include_svg:
+        svg_path = out_dir / f"{base_name}.svg"
+        _cad_v3_write_text(svg_path, _cad_v3_render_svg(layout))
+        urls["svg_path"] = str(svg_path)
+        urls["svg_url"] = _cad_v3_upload_public_file(svg_path, project_id, "image/svg+xml")
+
+    if include_dxf:
+        dxf_path = out_dir / f"{base_name}.dxf"
+        _cad_v3_write_text(dxf_path, _cad_v3_render_dxf(layout))
+        urls["dxf_path"] = str(dxf_path)
+        urls["dxf_url"] = _cad_v3_upload_public_file(dxf_path, project_id, "application/dxf")
+
+    if include_pdf:
+        pdf_path = out_dir / f"{base_name}.pdf"
+        _cad_v3_render_pdf(layout, pdf_path)
+        urls["pdf_path"] = str(pdf_path)
+        urls["pdf_url"] = _cad_v3_upload_public_file(pdf_path, project_id, "application/pdf")
+
+    return urls
+
+
+def _cad_v3_response_payload(layout: _CadV3Dict[str, _CadV3Any], urls: _CadV3Optional[_CadV3Dict[str, _CadV3Any]] = None, row: _CadV3Optional[_CadV3Dict[str, _CadV3Any]] = None) -> _CadV3Dict[str, _CadV3Any]:
+    urls = urls or {}
+    return {
+        "ok": True,
+        "version": "CAD_V3",
+        "id": (row or {}).get("id"),
+        "project_id": layout.get("project_id"),
+        "status": (row or {}).get("status", "ready"),
+        "layout_data": layout,
+        "svg_url": urls.get("svg_url") or (row or {}).get("svg_url"),
+        "pdf_url": urls.get("pdf_url") or (row or {}).get("pdf_url"),
+        "dxf_url": urls.get("dxf_url") or (row or {}).get("dxf_url"),
+        "json_url": urls.get("json_url") or (row or {}).get("json_url"),
+        "urls": {k: v for k, v in urls.items() if k.endswith("_url")},
+    }
+
+
+@app.get("/api/cad/v3/sample")
+def cad_v3_sample() -> _CadV3Dict[str, _CadV3Any]:
+    sample = CadV3GenerateRequest(
+        project_id="cad-v3-sample",
+        title="Sample Event CAD V3",
+        brief="36 x 22 meter corporate launch for 300 pax with stage, LED, VIP, FOH, BOH, cameras and power routes.",
+        unit="meters",
+        width=36,
+        height=22,
+        audience_count=300,
+        concept="Premium tech launch layout",
+    )
+    layout = _cad_v3_build_layout(sample)
+    return {
+        "ok": True,
+        "version": "CAD_V3",
+        "message": "CAD V3 backend is loaded. Use POST /api/cad/v3/generate to create DXF/SVG/PDF/JSON files.",
+        "sample_request": sample.model_dump() if hasattr(sample, "model_dump") else sample.dict(),
+        "layout_data": layout,
+    }
+
+
+@app.post("/api/cad/v3/calculate")
+def cad_v3_calculate(payload: CadV3GenerateRequest) -> _CadV3Dict[str, _CadV3Any]:
+    layout = _cad_v3_build_layout(payload)
+    return {"ok": True, "version": "CAD_V3", "layout_data": layout}
+
+
+@app.post("/api/cad/v3/generate")
+def cad_v3_generate(payload: CadV3GenerateRequest) -> _CadV3Dict[str, _CadV3Any]:
+    layout = _cad_v3_build_layout(payload)
+    urls = _cad_v3_generate_files(
+        layout,
+        include_svg=bool(payload.include_svg),
+        include_pdf=bool(payload.include_pdf),
+        include_dxf=bool(payload.include_dxf),
+    )
+
+    row: _CadV3Dict[str, _CadV3Any] = {}
+    try:
+        row = db_insert(
+            "cad_layouts",
+            {
+                "project_id": str(layout.get("project_id")),
+                "layout_data": layout,
+                "svg_url": urls.get("svg_url"),
+                "pdf_url": urls.get("pdf_url"),
+                "dxf_url": urls.get("dxf_url"),
+                "json_url": urls.get("json_url"),
+                "status": "ready",
+            },
+        )
+    except Exception as exc:
+        print("CAD V3 db_insert failed. Files generated but row was not saved:", repr(exc))
+        row = {"id": None, "status": "ready", "db_warning": str(exc)}
+
+    response = _cad_v3_response_payload(layout, urls, row)
+    if row.get("db_warning"):
+        response["db_warning"] = row.get("db_warning")
+    return response
+
+
+@app.post("/api/cad/v3/upload")
+async def cad_v3_upload(
+    file: _CadV3UploadFile = _CadV3File(...),
+    project_id: str = _CadV3Form("demo-cad-project"),
+    brief: str = _CadV3Form(""),
+    unit: str = _CadV3Form("meters"),
+    width: _CadV3Optional[float] = _CadV3Form(None),
+    height: _CadV3Optional[float] = _CadV3Form(None),
+    audience_count: _CadV3Optional[int] = _CadV3Form(None),
+) -> _CadV3Dict[str, _CadV3Any]:
+    original_name = file.filename or "uploaded-cad-reference"
+    ext = Path(original_name).suffix.lower() or ".bin"
+    upload_dir = UPLOAD_DIR / "cad_v3" / _cad_v3_safe_name(project_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / f"{int(_cad_v3_time.time())}-{uuid.uuid4().hex[:8]}-{_cad_v3_safe_name(original_name)}"
+    saved_path.write_bytes(await file.read())
+    upload_url = _cad_v3_upload_public_file(saved_path, project_id, file.content_type or _cad_v3_mimetypes.guess_type(str(saved_path))[0] or "application/octet-stream")
+
+    payload = CadV3GenerateRequest(
+        project_id=project_id,
+        title="Uploaded Reference CAD Layout V3",
+        brief=brief or f"CAD layout from uploaded reference file: {original_name}",
+        unit=unit,
+        width=width,
+        height=height,
+        audience_count=audience_count,
+    )
+    layout = _cad_v3_build_layout(payload)
+    layout["source_upload"] = {
+        "filename": original_name,
+        "content_type": file.content_type,
+        "extension": ext,
+        "url": upload_url,
+        "note": "V3 stores the upload as a reference. Real DWG/DXF parsing/import is reserved for the next CAD import phase.",
+    }
+
+    urls = _cad_v3_generate_files(layout, include_svg=True, include_pdf=True, include_dxf=True)
+    row: _CadV3Dict[str, _CadV3Any] = {}
+    try:
+        row = db_insert(
+            "cad_layouts",
+            {
+                "project_id": str(project_id),
+                "layout_data": layout,
+                "svg_url": urls.get("svg_url"),
+                "pdf_url": urls.get("pdf_url"),
+                "dxf_url": urls.get("dxf_url"),
+                "json_url": urls.get("json_url"),
+                "status": "ready",
+            },
+        )
+    except Exception as exc:
+        print("CAD V3 upload db_insert failed:", repr(exc))
+        row = {"id": None, "status": "ready", "db_warning": str(exc)}
+
+    response = _cad_v3_response_payload(layout, urls, row)
+    response["upload_url"] = upload_url
+    if row.get("db_warning"):
+        response["db_warning"] = row.get("db_warning")
+    return response
+
+
+@app.get("/api/cad/v3/{project_id}/latest")
+def cad_v3_latest(project_id: str) -> _CadV3Dict[str, _CadV3Any]:
+    try:
+        rows = db_list("cad_layouts", limit=1, order_key="created_at", desc=True, project_id=str(project_id))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read cad_layouts table: {exc}")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No CAD V3 layout found for this project_id")
+
+    row = rows[0]
+    layout = load_json(row.get("layout_data"), row.get("layout_data") or {})
+    return _cad_v3_response_payload(layout, {}, row)
+
+# ==============================================================================
+# END CAD BACKEND V3 PATCH
+# ==============================================================================
