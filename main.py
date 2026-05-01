@@ -1334,6 +1334,7 @@ def list_agents():
 
 
 @app.get("/studio/frontend-contract")
+@app.post("/studio/frontend-contract")
 def studio_frontend_contract():
     return {
         "ok": True,
