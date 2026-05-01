@@ -8,7 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+import requests
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -161,6 +162,24 @@ class PresentationBuildRequest(BaseModel):
     context: Dict[str, Any] = {}
 
 
+class ResearchRunRequest(BaseModel):
+    project_id: Optional[str] = None
+    brief: Optional[str] = None
+    brand: Optional[str] = None
+    venue: Optional[str] = None
+    event_type: Optional[str] = None
+    query: Optional[str] = None
+    max_results: int = 5
+
+
+class JobCreateRequest(BaseModel):
+    project_id: str
+    job_kind: str
+    agent_id: Optional[str] = None
+    payload: Dict[str, Any] = {}
+    run_async: bool = True
+
+
 # =============================================================================
 # IN-MEMORY STORES
 # =============================================================================
@@ -168,6 +187,8 @@ class PresentationBuildRequest(BaseModel):
 PROJECT_STORE: Dict[str, Dict[str, Any]] = {}
 PROJECT_ASSETS: Dict[str, List[Dict[str, Any]]] = {}
 PROJECT_JOBS: Dict[str, List[Dict[str, Any]]] = {}
+JOB_STORE: Dict[str, Dict[str, Any]] = {}
+RESEARCH_STORE: Dict[str, List[Dict[str, Any]]] = {}
 ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -255,6 +276,7 @@ def register_default_agents() -> None:
         ("ACCOUNT_AGENT", "Account Agent", "Manages credits, packages, billing, rate cards and low-balance alerts.", "/account/agent", ["credits", "billing", "rates"], 0, "account"),
         ("UCD_AGENT", "Universal Creative Director", "60-year senior creative director. Understands brand, brief, venue, category, budget and routes single-job or full-project workflows.", "/ucd/chat", ["brief", "brand", "orchestration", "single-job-routing", "cad-fullscreen"], 15, "orchestrator"),
         ("CONCEPT_AGENT", "Concept Agent", "45-year creative director. Thinks twice, researches brand/category/technology and creates multiple distinct product-launch and event ideas.", "/projects/{project_id}/run", ["concept", "product-launch", "technology", "research"], 60, "creative"),
+        ("RESEARCH_AGENT", "Research Agent", "Researches brand history, past events, category references, venue images/layout clues and useful technologies before creative output.", "/research/run", ["research", "brand", "venue", "category", "technology"], 40, "creative"),
         ("MOODBOARD_AGENT", "Moodboard Agent", "45-year creative director for mood, materials, lighting, ambience, seating, stage look and visual explanation.", "/api/moodboard/generate", ["moodboard", "materials", "lighting", "ambience"], 120, "visual"),
         ("GRAPHICS_2D_AGENT", "2D Graphics Art Director", "45-year art director for invites, badges, registration backdrop, table facade, stage backdrop, copy and print sizes.", "/ai/generate-2d", ["2d", "invite", "badge", "backdrop", "copy"], 100, "visual"),
         ("RENDER_3D_AGENT", "3D Render Design Agent", "40-year 3D designer. Creates 3D scenes, structures and realistic renders using CAD dimensions and venue references.", "/projects/{project_id}/renders/generate-separated", ["3d", "renders", "venue", "structures"], 180, "visual"),
@@ -321,6 +343,112 @@ def get_supabase():
     except Exception as exc:
         print(f"[WARN] Supabase client unavailable: {exc}")
         return None
+
+
+def sb_table_insert(table: str, row: Dict[str, Any]) -> None:
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        sb.table(table).insert(row).execute()
+    except Exception as exc:
+        print(f"[WARN] Supabase insert {table} failed: {exc}")
+
+
+def sb_table_upsert(table: str, row: Dict[str, Any]) -> None:
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        sb.table(table).upsert(row).execute()
+    except Exception as exc:
+        print(f"[WARN] Supabase upsert {table} failed: {exc}")
+
+
+def sb_table_select_one(table: str, key: str, value: Any) -> Optional[Dict[str, Any]]:
+    sb = get_supabase()
+    if not sb:
+        return None
+    try:
+        res = sb.table(table).select("*").eq(key, value).limit(1).execute()
+        data = getattr(res, "data", None) or []
+        return data[0] if data else None
+    except Exception as exc:
+        print(f"[WARN] Supabase select {table} failed: {exc}")
+        return None
+
+
+def persist_project(project: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_projects", {
+        "id": project.get("id") or project.get("project_id"),
+        "project_id": project.get("project_id") or project.get("id"),
+        "project_name": project.get("project_name") or project.get("title"),
+        "title": project.get("title") or project.get("project_name"),
+        "brief": project.get("brief"),
+        "event_type": project.get("event_type"),
+        "brand": project.get("brand"),
+        "venue": project.get("venue"),
+        "style_direction": project.get("style_direction"),
+        "status": project.get("status"),
+        "data": project,
+        "updated_at": project.get("updated_at") or now_ts(),
+    })
+
+
+def persist_asset(asset: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_assets", {
+        "id": asset.get("id"),
+        "project_id": asset.get("project_id"),
+        "section": asset.get("section"),
+        "asset_type": asset.get("asset_type"),
+        "title": asset.get("title"),
+        "description": asset.get("description"),
+        "preview_url": asset.get("preview_url") or asset.get("image_url"),
+        "status": asset.get("status", "ready"),
+        "data": asset,
+        "created_at": asset.get("created_at") or now_ts(),
+    })
+
+
+def persist_job(job: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_jobs", {
+        "id": job.get("id"),
+        "project_id": job.get("project_id"),
+        "job_kind": job.get("job_kind"),
+        "agent_id": job.get("agent_id"),
+        "section": job.get("section"),
+        "status": job.get("status"),
+        "progress": job.get("progress", 0),
+        "data": job,
+        "created_at": job.get("created_at") or now_ts(),
+        "updated_at": job.get("updated_at") or now_ts(),
+    })
+
+
+def persist_research(item: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_research", {
+        "id": item.get("id"),
+        "project_id": item.get("project_id"),
+        "brand": item.get("brand"),
+        "venue": item.get("venue"),
+        "event_type": item.get("event_type"),
+        "query": item.get("query"),
+        "source": item.get("source"),
+        "data": item,
+        "created_at": item.get("created_at") or now_ts(),
+    })
+
+
+def load_project(project_id: str) -> Optional[Dict[str, Any]]:
+    project = PROJECT_STORE.get(project_id)
+    if project:
+        return project
+    row = sb_table_select_one("bc_projects", "project_id", project_id) or sb_table_select_one("bc_projects", "id", project_id)
+    if row:
+        data = row.get("data") if isinstance(row.get("data"), dict) else row
+        PROJECT_STORE[project_id] = data
+        return data
+    return None
 
 
 def dump_model(model: Any) -> Dict[str, Any]:
@@ -455,6 +583,90 @@ def research_directives(ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def search_web(query: str, max_results: int = 5) -> Dict[str, Any]:
+    query = (query or "").strip()
+    if not query:
+        return {"provider": "none", "query": query, "results": []}
+    max_results = max(1, min(10, int(max_results or 5)))
+    tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+    serper_key = os.getenv("SERPER_API_KEY", "").strip()
+    try:
+        if tavily_key:
+            res = requests.post(
+                "https://api.tavily.com/search",
+                json={"api_key": tavily_key, "query": query, "max_results": max_results, "search_depth": "advanced"},
+                timeout=20,
+            )
+            res.raise_for_status()
+            data = res.json()
+            return {
+                "provider": "tavily",
+                "query": query,
+                "results": [
+                    {"title": r.get("title"), "url": r.get("url"), "snippet": r.get("content")}
+                    for r in (data.get("results") or [])[:max_results]
+                ],
+            }
+        if serper_key:
+            res = requests.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+                json={"q": query, "num": max_results},
+                timeout=20,
+            )
+            res.raise_for_status()
+            data = res.json()
+            organic = data.get("organic") or []
+            return {
+                "provider": "serper",
+                "query": query,
+                "results": [
+                    {"title": r.get("title"), "url": r.get("link"), "snippet": r.get("snippet")}
+                    for r in organic[:max_results]
+                ],
+            }
+    except Exception as exc:
+        print(f"[WARN] research search failed for {query!r}: {exc}")
+    return {
+        "provider": "fallback",
+        "query": query,
+        "results": [],
+        "note": "Set TAVILY_API_KEY or SERPER_API_KEY to enable live web research.",
+    }
+
+
+def run_research_pack(ctx: Dict[str, Any], max_results: int = 5, project_id: Optional[str] = None) -> Dict[str, Any]:
+    brand = ctx.get("brand") or "brand"
+    venue = ctx.get("venue") or "venue"
+    event_type = ctx.get("event_type") or ctx.get("industry") or "event"
+    queries = {
+        "brand_past_events": f"{brand} past events product launches activations exhibitions",
+        "category_global_references": f"best global {event_type} event experience product launch technology ideas",
+        "technology_references": f"latest event technology RFID NFC AR projection mapping interactive guest experience",
+        "venue_layout_references": f"{venue} venue layout capacity images floor plan",
+    }
+    pack = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "brand": brand,
+        "venue": venue,
+        "event_type": event_type,
+        "source": "research_agent",
+        "created_at": now_ts(),
+        "queries": queries,
+        "results": {key: search_web(query, max_results) for key, query in queries.items()},
+        "strategy_notes": [
+            "Use references for strategy and production intelligence only; never copy visuals literally.",
+            "Convert brand research into tone, material, technology and guest-experience decisions.",
+            "Convert venue research into dimension assumptions, sightline risks, entry flow and CAD checks.",
+        ],
+    }
+    if project_id:
+        RESEARCH_STORE.setdefault(project_id, []).append(pack)
+    persist_research(pack)
+    return pack
+
+
 def brief_context(brief: str, req: Optional[ProjectRunRequest] = None) -> Dict[str, Any]:
     industry = (req.event_type if req and req.event_type else None) or detect_industry(brief)
     ctx = {
@@ -515,6 +727,7 @@ def store_asset(project_id: str, section: str, asset_type: str, title: str, desc
         "meta": meta or {},
     }
     PROJECT_ASSETS.setdefault(project_id, []).append(asset)
+    persist_asset(asset)
     return asset
 
 
@@ -1029,6 +1242,78 @@ def layout_job_response(message: str, project_id: str = "demo-project") -> Dict[
     }
 
 
+def create_job(project_id: str, job_kind: str, agent_id: Optional[str] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    job = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "job_kind": job_kind,
+        "agent_id": agent_id,
+        "section": job_kind,
+        "status": "queued",
+        "progress": 0,
+        "payload": payload or {},
+        "result": None,
+        "error": None,
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+    }
+    JOB_STORE[job["id"]] = job
+    PROJECT_JOBS.setdefault(project_id, []).append(job)
+    persist_job(job)
+    return job
+
+
+def update_job(job_id: str, status: Optional[str] = None, progress: Optional[int] = None, result: Any = None, error: Optional[str] = None) -> Dict[str, Any]:
+    job = JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if status is not None:
+        job["status"] = status
+    if progress is not None:
+        job["progress"] = max(0, min(100, int(progress)))
+    if result is not None:
+        job["result"] = result
+    if error is not None:
+        job["error"] = error
+    job["updated_at"] = now_ts()
+    persist_job(job)
+    return job
+
+
+def execute_job(job_id: str) -> None:
+    job = JOB_STORE.get(job_id)
+    if not job:
+        return
+    try:
+        update_job(job_id, "running", 10)
+        project_id = job["project_id"]
+        kind = job["job_kind"]
+        payload = job.get("payload") or {}
+        result: Any
+        if kind == "research":
+            project = load_project(project_id) or {}
+            ctx = brief_context(payload.get("brief") or project.get("brief") or "", None)
+            ctx["brand"] = payload.get("brand") or project.get("brand") or ctx.get("brand")
+            ctx["venue"] = payload.get("venue") or project.get("venue") or ctx.get("venue")
+            result = run_research_pack(ctx, payload.get("max_results", 5), project_id)
+        elif kind == "moodboard":
+            result = {"assets": build_moodboard_assets(project_id, payload.get("concept_index", 0), payload.get("count", 6))}
+        elif kind == "2d_graphics":
+            result = {"assets": build_2d_assets(project_id, payload.get("concept_index", 0))}
+        elif kind == "3d_renders":
+            result = {"assets": build_3d_assets(project_id, payload.get("concept_index", 0))}
+        elif kind == "departments":
+            result = department_outputs(project_id, payload.get("concept_index", 0))
+            result["pdf_assets"] = build_pdf_assets(project_id, payload.get("concept_index", 0))
+        elif kind == "presentation":
+            result = {"presentation": presentation_deck(project_id, payload.get("concept_index", 0))}
+        else:
+            result = {"message": f"Job kind {kind} accepted but no worker is configured yet."}
+        update_job(job_id, "completed", 100, result=result)
+    except Exception as exc:
+        update_job(job_id, "failed", 100, error=str(exc))
+
+
 # =============================================================================
 # API ENDPOINTS
 # =============================================================================
@@ -1068,6 +1353,9 @@ def studio_frontend_contract():
             "brand_research_directives": True,
             "venue_research_directives": True,
             "technology_research_directives": True,
+            "supabase_persistence": bool(get_supabase()),
+            "job_queue": True,
+            "research_agent": True,
         },
         "endpoints": {
             "agents": "/agents",
@@ -1075,6 +1363,10 @@ def studio_frontend_contract():
             "account_balance": "/account/balance",
             "account_packages": "/account/packages",
             "project_create": "/projects",
+            "jobs_create": "/jobs",
+            "jobs_get": "/jobs/{job_id}",
+            "research_run": "/research/run",
+            "project_research": "/projects/{project_id}/research",
             "project_run": "/projects/{project_id}/run",
             "concept_select": "/projects/{project_id}/select-concept",
             "moodboard_generate": "/api/moodboard/generate",
@@ -1126,6 +1418,126 @@ def account_rates():
 @app.get("/account/packages")
 def account_packages():
     return {"ok": True, "currency": "INR", "packages": PACKAGE_PLANS, "payment_links_configured": False}
+
+
+@app.get("/supabase/schema.sql")
+def supabase_schema_sql():
+    sql = """
+create table if not exists public.bc_projects (
+  id text primary key,
+  project_id text unique,
+  project_name text,
+  title text,
+  brief text,
+  event_type text,
+  brand text,
+  venue text,
+  style_direction text,
+  status text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table if not exists public.bc_assets (
+  id text primary key,
+  project_id text,
+  section text,
+  asset_type text,
+  title text,
+  description text,
+  preview_url text,
+  status text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_jobs (
+  id text primary key,
+  project_id text,
+  job_kind text,
+  agent_id text,
+  section text,
+  status text,
+  progress int default 0,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table if not exists public.bc_research (
+  id text primary key,
+  project_id text,
+  brand text,
+  venue text,
+  event_type text,
+  query text,
+  source text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_credit_ledger (
+  id uuid primary key default gen_random_uuid(),
+  user_key text not null,
+  amount int not null,
+  reason text,
+  agent_id text,
+  project_id text,
+  endpoint text,
+  request_id text,
+  balance_after int,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_credit_accounts (
+  user_key text primary key,
+  credit_balance int not null default 2500,
+  updated_at timestamptz default now()
+);
+
+create or replace function public.bc_consume_credits(
+  p_user_key text,
+  p_amount int,
+  p_reason text default null,
+  p_agent_id text default null,
+  p_project_id text default null,
+  p_endpoint text default null,
+  p_request_id text default null
+) returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_balance int;
+begin
+  insert into public.bc_credit_accounts(user_key, credit_balance)
+  values (p_user_key, 2500)
+  on conflict (user_key) do nothing;
+
+  select credit_balance into v_balance
+  from public.bc_credit_accounts
+  where user_key = p_user_key
+  for update;
+
+  if coalesce(p_amount,0) > v_balance then
+    raise exception 'Insufficient credits. Required %, balance %', p_amount, v_balance;
+  end if;
+
+  update public.bc_credit_accounts
+  set credit_balance = credit_balance - coalesce(p_amount,0),
+      updated_at = now()
+  where user_key = p_user_key
+  returning credit_balance into v_balance;
+
+  insert into public.bc_credit_ledger(user_key, amount, reason, agent_id, project_id, endpoint, request_id, balance_after)
+  values (p_user_key, coalesce(p_amount,0), p_reason, p_agent_id, p_project_id, p_endpoint, p_request_id, v_balance);
+
+  return jsonb_build_object('credit_balance', v_balance, 'balance_after', v_balance);
+end;
+$$;
+"""
+    return {"ok": True, "sql": sql.strip()}
 
 
 @app.post("/account/credits/consume")
@@ -1181,6 +1593,7 @@ def create_project(req: ProjectCreateRequest):
     PROJECT_STORE[project_id] = project
     PROJECT_ASSETS.setdefault(project_id, [])
     PROJECT_JOBS.setdefault(project_id, [])
+    persist_project(project)
     return project
 
 
@@ -1191,7 +1604,7 @@ def list_projects():
 
 @app.get("/projects/{project_id}")
 def get_project(project_id: str):
-    project = PROJECT_STORE.get(project_id)
+    project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     return {"ok": True, "project": project, "assets": PROJECT_ASSETS.get(project_id, []), "jobs": PROJECT_JOBS.get(project_id, [])}
@@ -1199,19 +1612,24 @@ def get_project(project_id: str):
 
 @app.post("/projects/{project_id}/run")
 def run_project_pipeline(project_id: str, req: ProjectRunRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    project = PROJECT_STORE.get(project_id)
+    project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     brief = (req.brief or req.text or project.get("brief") or "").strip()
     if not brief:
         raise HTTPException(status_code=400, detail="Brief text is required.")
     ctx = brief_context(brief, req)
+    research = run_research_pack(ctx, 5, project_id)
     structured = build_structured_brief(brief, ctx)
+    structured["live_research"] = research
     concepts = generate_concepts(brief, ctx, 3)
     project.update({"brief": brief, "event_type": ctx["event_type"], "brand": ctx["brand"], "venue": ctx["venue"], "style_direction": ctx["style_direction"], "structured_brief": structured, "analysis": structured["executive_summary"], "concepts": concepts, "concept_options": concepts, "status": "concepts_ready", "updated_at": now_ts()})
-    PROJECT_JOBS.setdefault(project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "concept", "section": "concepts", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
+    persist_project(project)
+    job = {"id": str(uuid.uuid4()), "project_id": project_id, "job_kind": "concept", "agent_id": "CONCEPT_AGENT", "section": "concepts", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
+    PROJECT_JOBS.setdefault(project_id, []).append(job)
+    persist_job(job)
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["CONCEPT_AGENT"]["credit_cost"], "Concept generation", "CONCEPT_AGENT", project_id, f"/projects/{project_id}/run")
-    return {"ok": True, "project_id": project_id, "analysis": structured["executive_summary"], "structured_brief": structured, "concepts": concepts, "concept_options": concepts, "missing_questions": ctx["missing_questions"], "ucd_message": f"{ctx['user_name']}, I understood the brand and brief. Review missing questions, confirm deliverables and choose a concept route.", "account": acct, "hourly_rates_inr": AGENT_HOURLY_RATES_INR}
+    return {"ok": True, "project_id": project_id, "analysis": structured["executive_summary"], "structured_brief": structured, "research": research, "concepts": concepts, "concept_options": concepts, "missing_questions": ctx["missing_questions"], "ucd_message": f"{ctx['user_name']}, I understood the brand and brief. Review missing questions, confirm deliverables and choose a concept route.", "account": acct, "hourly_rates_inr": AGENT_HOURLY_RATES_INR}
 
 
 @app.get("/projects/{project_id}/concepts")
@@ -1221,7 +1639,7 @@ def get_project_concepts(project_id: str):
 
 @app.post("/projects/{project_id}/select-concept")
 def select_project_concept(project_id: str, req: ConceptSelectRequest):
-    project = PROJECT_STORE.get(project_id)
+    project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     concepts = project.get("concepts") or []
@@ -1232,6 +1650,7 @@ def select_project_concept(project_id: str, req: ConceptSelectRequest):
     project["selected_concept"] = concepts[idx]
     project["status"] = "concept_selected"
     project["updated_at"] = now_ts()
+    persist_project(project)
     return {"ok": True, "project_id": project_id, "selected_concept_index": idx, "selected_concept": concepts[idx]}
 
 
@@ -1248,10 +1667,59 @@ def list_project_jobs(project_id: str):
     return {"ok": True, "jobs": PROJECT_JOBS.get(project_id, [])}
 
 
+@app.post("/jobs")
+def create_background_job(req: JobCreateRequest, background_tasks: BackgroundTasks):
+    if not load_project(req.project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    job = create_job(req.project_id, req.job_kind, req.agent_id, req.payload)
+    if req.run_async:
+        background_tasks.add_task(execute_job, job["id"])
+    else:
+        execute_job(job["id"])
+        job = JOB_STORE[job["id"]]
+    return {"ok": True, "job": job}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    job = JOB_STORE.get(job_id) or sb_table_select_one("bc_jobs", "id", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"ok": True, "job": job}
+
+
+@app.post("/jobs/{job_id}/run")
+def run_job_now(job_id: str, background_tasks: BackgroundTasks):
+    if job_id not in JOB_STORE:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    background_tasks.add_task(execute_job, job_id)
+    return {"ok": True, "job": JOB_STORE[job_id]}
+
+
 @app.get("/projects/{project_id}/pdfs")
 def list_project_pdfs(project_id: str):
     assets = [a for a in PROJECT_ASSETS.get(project_id, []) if a.get("section") == "pdf"]
     return {"ok": True, "project_id": project_id, "assets": assets, "pdfs": assets}
+
+
+@app.get("/projects/{project_id}/research")
+def list_project_research(project_id: str):
+    return {"ok": True, "project_id": project_id, "research": RESEARCH_STORE.get(project_id, [])}
+
+
+@app.post("/research/run")
+def research_run(req: ResearchRunRequest):
+    brief = req.brief or req.query or ""
+    ctx = brief_context(brief, None)
+    if req.brand:
+        ctx["brand"] = req.brand
+    if req.venue:
+        ctx["venue"] = req.venue
+    if req.event_type:
+        ctx["event_type"] = req.event_type
+        ctx["industry"] = req.event_type
+    pack = run_research_pack(ctx, req.max_results, req.project_id)
+    return {"ok": True, "research": pack}
 
 
 # Creative output endpoints
@@ -1263,38 +1731,44 @@ def get_api_project_moodboard(project_id: str):
 
 @app.post("/api/moodboard/generate")
 def generate_moodboard(req: MoodboardGenerateRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if req.project_id not in PROJECT_STORE:
+    if not load_project(req.project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["MOODBOARD_AGENT"]["credit_cost"], "Moodboard generation", "MOODBOARD_AGENT", req.project_id, "/api/moodboard/generate")
     assets = build_moodboard_assets(req.project_id, req.concept_index or 0, req.count or 6)
-    PROJECT_JOBS.setdefault(req.project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "moodboard", "section": "moodboard", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
+    job = {"id": str(uuid.uuid4()), "project_id": req.project_id, "job_kind": "moodboard", "agent_id": "MOODBOARD_AGENT", "section": "moodboard", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
+    PROJECT_JOBS.setdefault(req.project_id, []).append(job)
+    persist_job(job)
     return {"ok": True, "project_id": req.project_id, "assets": assets, "account": acct, "message": "Moodboard generated with mood, materials, lighting, ambience, seating and stage logic."}
 
 
 @app.post("/ai/generate-2d")
 def generate_2d(req: AssetGenerateRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if req.project_id not in PROJECT_STORE:
+    if not load_project(req.project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["GRAPHICS_2D_AGENT"]["credit_cost"], "2D graphics generation", "GRAPHICS_2D_AGENT", req.project_id, "/ai/generate-2d")
     assets = build_2d_assets(req.project_id, req.concept_index or 0)
-    PROJECT_JOBS.setdefault(req.project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "2d_graphics", "section": "2d_graphics", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
+    job = {"id": str(uuid.uuid4()), "project_id": req.project_id, "job_kind": "2d_graphics", "agent_id": "GRAPHICS_2D_AGENT", "section": "2d_graphics", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
+    PROJECT_JOBS.setdefault(req.project_id, []).append(job)
+    persist_job(job)
     return {"ok": True, "project_id": req.project_id, "assets": assets, "account": acct}
 
 
 @app.post("/projects/{project_id}/renders/generate-separated")
 def generate_3d(project_id: str, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if project_id not in PROJECT_STORE:
+    if not load_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", "RENDER_3D_AGENT", project_id, f"/projects/{project_id}/renders/generate-separated")
     idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
     assets = build_3d_assets(project_id, idx)
-    PROJECT_JOBS.setdefault(project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "3d_renders", "section": "renders", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
+    job = {"id": str(uuid.uuid4()), "project_id": project_id, "job_kind": "3d_renders", "agent_id": "RENDER_3D_AGENT", "section": "renders", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
+    PROJECT_JOBS.setdefault(project_id, []).append(job)
+    persist_job(job)
     return {"ok": True, "project_id": project_id, "assets": assets, "account": acct}
 
 
 @app.post("/project/{project_id}/departments/build")
 def build_departments(project_id: str):
-    if project_id not in PROJECT_STORE:
+    if not load_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
     outputs = department_outputs(project_id, idx)
@@ -1303,17 +1777,19 @@ def build_departments(project_id: str):
     PROJECT_STORE[project_id]["department_outputs"] = outputs
     PROJECT_STORE[project_id]["pdf_assets"] = pdf_assets
     PROJECT_STORE[project_id]["updated_at"] = now_ts()
+    persist_project(PROJECT_STORE[project_id])
     return {"ok": True, "project_id": project_id, "pdf_assets": pdf_assets, **outputs}
 
 
 @app.post("/projects/{project_id}/presentation/build")
 def build_presentation(project_id: str, req: PresentationBuildRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if project_id not in PROJECT_STORE:
+    if not load_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id, f"/projects/{project_id}/presentation/build")
     deck = presentation_deck(project_id, req.concept_index or PROJECT_STORE[project_id].get("selected_concept_index") or 0)
     PROJECT_STORE[project_id]["presentation"] = deck
     PROJECT_STORE[project_id]["updated_at"] = now_ts()
+    persist_project(PROJECT_STORE[project_id])
     return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
 
 
