@@ -31,7 +31,11 @@ RENDER_DOMAIN = os.getenv("RENDER_EXTERNAL_HOSTNAME", "localhost:8000")
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "media"))
 GENERATED_DIR = Path(os.getenv("GENERATED_DIR", "media/generated"))
 CAD_PRO_DIR = Path(os.getenv("CAD_PRO_DIR", "media/cad_pro"))
-for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR]:
+DATA_DIR = Path(os.getenv("DATA_DIR", "media/data"))
+PROJECT_DATA_DIR = DATA_DIR / "projects"
+ASSET_DATA_DIR = DATA_DIR / "assets"
+JOB_DATA_DIR = DATA_DIR / "jobs"
+for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR, DATA_DIR, PROJECT_DATA_DIR, ASSET_DATA_DIR, JOB_DATA_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title=APP_NAME, version=API_VERSION)
@@ -438,7 +442,63 @@ def sb_table_select_one(table: str, key: str, value: Any) -> Optional[Dict[str, 
         return None
 
 
+def write_json_file(path: Path, data: Any) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[WARN] JSON persistence failed for {path}: {exc}")
+
+
+def read_json_file(path: Path, fallback: Any = None) -> Any:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] JSON load failed for {path}: {exc}")
+    return fallback
+
+
+def project_disk_path(project_id: str) -> Path:
+    return PROJECT_DATA_DIR / f"{project_id}.json"
+
+
+def assets_disk_path(project_id: str) -> Path:
+    return ASSET_DATA_DIR / f"{project_id}.json"
+
+
+def jobs_disk_path(project_id: str) -> Path:
+    return JOB_DATA_DIR / f"{project_id}.json"
+
+
+def load_project_assets(project_id: str) -> List[Dict[str, Any]]:
+    if project_id not in PROJECT_ASSETS:
+        PROJECT_ASSETS[project_id] = read_json_file(assets_disk_path(project_id), []) or []
+    return PROJECT_ASSETS.setdefault(project_id, [])
+
+
+def load_project_jobs(project_id: str) -> List[Dict[str, Any]]:
+    if project_id not in PROJECT_JOBS:
+        jobs = read_json_file(jobs_disk_path(project_id), []) or []
+        PROJECT_JOBS[project_id] = jobs
+        for job in jobs:
+            if isinstance(job, dict) and job.get("id"):
+                JOB_STORE[job["id"]] = job
+    return PROJECT_JOBS.setdefault(project_id, [])
+
+
+def disk_project_ids() -> List[str]:
+    try:
+        return [p.stem for p in PROJECT_DATA_DIR.glob("*.json")]
+    except Exception:
+        return []
+
+
 def persist_project(project: Dict[str, Any]) -> None:
+    project_id = project.get("project_id") or project.get("id")
+    if project_id:
+        PROJECT_STORE[project_id] = project
+        write_json_file(project_disk_path(project_id), project)
     sb_table_upsert("bc_projects", {
         "id": project.get("id") or project.get("project_id"),
         "project_id": project.get("project_id") or project.get("id"),
@@ -456,6 +516,14 @@ def persist_project(project: Dict[str, Any]) -> None:
 
 
 def persist_asset(asset: Dict[str, Any]) -> None:
+    project_id = asset.get("project_id")
+    if project_id:
+        assets = PROJECT_ASSETS.setdefault(project_id, read_json_file(assets_disk_path(project_id), []) or [])
+        if not any(a.get("id") == asset.get("id") for a in assets if isinstance(a, dict)):
+            assets.append(asset)
+        else:
+            PROJECT_ASSETS[project_id] = [asset if a.get("id") == asset.get("id") else a for a in assets]
+        write_json_file(assets_disk_path(project_id), PROJECT_ASSETS[project_id])
     sb_table_upsert("bc_assets", {
         "id": asset.get("id"),
         "project_id": asset.get("project_id"),
@@ -471,6 +539,16 @@ def persist_asset(asset: Dict[str, Any]) -> None:
 
 
 def persist_job(job: Dict[str, Any]) -> None:
+    project_id = job.get("project_id")
+    if project_id:
+        jobs = PROJECT_JOBS.setdefault(project_id, read_json_file(jobs_disk_path(project_id), []) or [])
+        if not any(j.get("id") == job.get("id") for j in jobs if isinstance(j, dict)):
+            jobs.append(job)
+        else:
+            PROJECT_JOBS[project_id] = [job if j.get("id") == job.get("id") else j for j in jobs]
+        if job.get("id"):
+            JOB_STORE[job["id"]] = job
+        write_json_file(jobs_disk_path(project_id), PROJECT_JOBS[project_id])
     sb_table_upsert("bc_jobs", {
         "id": job.get("id"),
         "project_id": job.get("project_id"),
@@ -528,12 +606,24 @@ def load_project(project_id: str) -> Optional[Dict[str, Any]]:
     project = PROJECT_STORE.get(project_id)
     if project:
         ensure_project_runtime(project)
+        load_project_assets(project_id)
+        load_project_jobs(project_id)
         return project
+    disk_project = read_json_file(project_disk_path(project_id))
+    if isinstance(disk_project, dict):
+        ensure_project_runtime(disk_project)
+        PROJECT_STORE[project_id] = disk_project
+        load_project_assets(project_id)
+        load_project_jobs(project_id)
+        return disk_project
     row = sb_table_select_one("bc_projects", "project_id", project_id) or sb_table_select_one("bc_projects", "id", project_id)
     if row:
         data = row.get("data") if isinstance(row.get("data"), dict) else row
         ensure_project_runtime(data)
         PROJECT_STORE[project_id] = data
+        write_json_file(project_disk_path(project_id), data)
+        load_project_assets(project_id)
+        load_project_jobs(project_id)
         return data
     return None
 
@@ -969,7 +1059,7 @@ def store_asset(project_id: str, section: str, asset_type: str, title: str, desc
 
 
 def selected_concept(project_id: str, concept_index: Optional[int] = 0) -> Dict[str, Any]:
-    project = PROJECT_STORE.get(project_id, {})
+    project = load_project(project_id) or {}
     concepts = project.get("concepts") or []
     if not concepts:
         return {}
@@ -1123,7 +1213,7 @@ def build_2d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, A
 
 def build_3d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, Any]]:
     concept = selected_concept(project_id, concept_index)
-    project = PROJECT_STORE.get(project_id, {})
+    project = load_project(project_id) or {}
     venue = (project.get("structured_brief") or {}).get("venue") or "venue to be researched"
     views = [
         ("3D Invite / Name Badge Render", "realistic product-style render of invite/name badge/printed collateral using approved 2D graphics"),
@@ -1172,7 +1262,7 @@ def department_outputs(project_id: str, concept_index: int = 0) -> Dict[str, Any
 
 
 def presentation_deck(project_id: str, concept_index: int = 0) -> Dict[str, Any]:
-    project = PROJECT_STORE.get(project_id, {})
+    project = load_project(project_id) or {}
     concept = selected_concept(project_id, concept_index)
     brief = project.get("structured_brief", {})
     return {
@@ -1935,6 +2025,8 @@ def create_project(req: ProjectCreateRequest):
 
 @app.get("/projects")
 def list_projects():
+    for project_id in disk_project_ids():
+        load_project(project_id)
     return {"ok": True, "projects": sorted(PROJECT_STORE.values(), key=lambda p: p.get("updated_at", 0), reverse=True)}
 
 
@@ -1944,7 +2036,7 @@ def get_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     workflow_recommendation(project)
-    return {"ok": True, "project": project, "assets": PROJECT_ASSETS.get(project_id, []), "jobs": PROJECT_JOBS.get(project_id, [])}
+    return {"ok": True, "project": project, "assets": load_project_assets(project_id), "jobs": load_project_jobs(project_id)}
 
 
 @app.get("/projects/{project_id}/memory")
@@ -2048,7 +2140,10 @@ def run_project_pipeline(project_id: str, req: ProjectRunRequest, request: Reque
 
 @app.get("/projects/{project_id}/concepts")
 def get_project_concepts(project_id: str):
-    return {"ok": True, "concepts": PROJECT_STORE.get(project_id, {}).get("concepts", [])}
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project_id": project_id, "concepts": project.get("concepts") or project.get("concept_options") or []}
 
 
 @app.post("/projects/{project_id}/select-concept")
@@ -2056,7 +2151,7 @@ def select_project_concept(project_id: str, req: ConceptSelectRequest):
     project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    concepts = project.get("concepts") or []
+    concepts = project.get("concepts") or project.get("concept_options") or []
     if not concepts:
         raise HTTPException(status_code=400, detail="No concepts generated yet.")
     idx = max(0, min(len(concepts) - 1, int(req.concept_index)))
@@ -2070,7 +2165,7 @@ def select_project_concept(project_id: str, req: ConceptSelectRequest):
 
 @app.get("/projects/{project_id}/assets")
 def list_project_assets(project_id: str, section: Optional[str] = None):
-    assets = PROJECT_ASSETS.get(project_id, [])
+    assets = load_project_assets(project_id)
     if section:
         assets = [a for a in assets if (a.get("section") or "").lower() == section.lower()]
     return {"ok": True, "assets": assets}
@@ -2078,7 +2173,7 @@ def list_project_assets(project_id: str, section: Optional[str] = None):
 
 @app.get("/projects/{project_id}/jobs")
 def list_project_jobs(project_id: str):
-    return {"ok": True, "jobs": PROJECT_JOBS.get(project_id, [])}
+    return {"ok": True, "jobs": load_project_jobs(project_id)}
 
 
 @app.post("/jobs")
@@ -2114,7 +2209,7 @@ def run_job_now(job_id: str, background_tasks: BackgroundTasks):
 
 @app.get("/projects/{project_id}/pdfs")
 def list_project_pdfs(project_id: str):
-    assets = [a for a in PROJECT_ASSETS.get(project_id, []) if a.get("section") == "pdf"]
+    assets = [a for a in load_project_assets(project_id) if a.get("section") == "pdf"]
     return {"ok": True, "project_id": project_id, "assets": assets, "pdfs": assets}
 
 
@@ -2141,7 +2236,7 @@ def research_run(req: ResearchRunRequest):
 # Creative output endpoints
 @app.get("/api/projects/{project_id}/moodboard")
 def get_api_project_moodboard(project_id: str):
-    assets = [a for a in PROJECT_ASSETS.get(project_id, []) if a.get("section") == "moodboard"]
+    assets = [a for a in load_project_assets(project_id) if a.get("section") == "moodboard"]
     return {"ok": True, "project_id": project_id, "assets": assets, "moodboard": assets, "images": assets}
 
 
@@ -2171,10 +2266,11 @@ def generate_2d(req: AssetGenerateRequest, request: Request, x_user_id: Optional
 
 @app.post("/projects/{project_id}/renders/generate-separated")
 def generate_3d(project_id: str, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if not load_project(project_id):
+    project = load_project(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", "RENDER_3D_AGENT", project_id, f"/projects/{project_id}/renders/generate-separated")
-    idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
+    idx = project.get("selected_concept_index") or 0
     assets = build_3d_assets(project_id, idx)
     job = {"id": str(uuid.uuid4()), "project_id": project_id, "job_kind": "3d_renders", "agent_id": "RENDER_3D_AGENT", "section": "renders", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
     PROJECT_JOBS.setdefault(project_id, []).append(job)
@@ -2184,28 +2280,30 @@ def generate_3d(project_id: str, request: Request, x_user_id: Optional[str] = He
 
 @app.post("/project/{project_id}/departments/build")
 def build_departments(project_id: str):
-    if not load_project(project_id):
+    project = load_project(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
+    idx = project.get("selected_concept_index") or 0
     outputs = department_outputs(project_id, idx)
     pdf_assets = build_pdf_assets(project_id, idx)
-    PROJECT_STORE[project_id].update(outputs)
-    PROJECT_STORE[project_id]["department_outputs"] = outputs
-    PROJECT_STORE[project_id]["pdf_assets"] = pdf_assets
-    PROJECT_STORE[project_id]["updated_at"] = now_ts()
-    persist_project(PROJECT_STORE[project_id])
+    project.update(outputs)
+    project["department_outputs"] = outputs
+    project["pdf_assets"] = pdf_assets
+    project["updated_at"] = now_ts()
+    persist_project(project)
     return {"ok": True, "project_id": project_id, "pdf_assets": pdf_assets, **outputs}
 
 
 @app.post("/projects/{project_id}/presentation/build")
 def build_presentation(project_id: str, req: PresentationBuildRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    if not load_project(project_id):
+    project = load_project(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id, f"/projects/{project_id}/presentation/build")
-    deck = presentation_deck(project_id, req.concept_index or PROJECT_STORE[project_id].get("selected_concept_index") or 0)
-    PROJECT_STORE[project_id]["presentation"] = deck
-    PROJECT_STORE[project_id]["updated_at"] = now_ts()
-    persist_project(PROJECT_STORE[project_id])
+    deck = presentation_deck(project_id, req.concept_index or project.get("selected_concept_index") or 0)
+    project["presentation"] = deck
+    project["updated_at"] = now_ts()
+    persist_project(project)
     return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
 
 
