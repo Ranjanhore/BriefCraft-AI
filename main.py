@@ -6,6 +6,9 @@ import os
 import re
 import time
 import uuid
+import json
+import random
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +41,7 @@ except Exception as _e:
 # =============================================================================
 AUDIO_DIR     = os.getenv("AUDIO_DIR", "audio_files")
 CAD_PRO_DIR   = os.getenv("CAD_PRO_DIR", "media/cad_pro")
+GENERATED_DIR = os.getenv("GENERATED_DIR", "media/generated")
 RENDER_DOMAIN = os.getenv("RENDER_EXTERNAL_HOSTNAME", "localhost:8000")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
 SB_URL        = os.getenv("SUPABASE_URL", "")
@@ -45,6 +49,7 @@ SB_KEY        = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CAD_PRO_DIR, exist_ok=True)
+os.makedirs(GENERATED_DIR, exist_ok=True)
 
 # Initialise OpenAI client safely
 def _get_openai():
@@ -87,6 +92,7 @@ app.add_middleware(
 
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 app.mount("/media/cad_pro", StaticFiles(directory=CAD_PRO_DIR), name="cad_pro_media")
+app.mount("/media/generated", StaticFiles(directory=GENERATED_DIR), name="generated_media")
 
 try:
     from cad_engine_pro import router as cad_pro_router
@@ -199,6 +205,56 @@ class CheckoutRequest(BaseModel):
     cancel_url: Optional[str] = None
 
 
+class ProjectCreateRequest(BaseModel):
+    title: Optional[str] = None
+    project_name: Optional[str] = None
+    brief: Optional[str] = None
+    brief_text: Optional[str] = None
+    event_type: Optional[str] = None
+    style_direction: Optional[str] = None
+
+
+class ProjectRunRequest(BaseModel):
+    text: Optional[str] = None
+    brief: Optional[str] = None
+    event_type: Optional[str] = None
+    style_direction: Optional[str] = None
+    user_name: Optional[str] = None
+    deliverables: List[str] = []
+    budget_range: Optional[str] = None
+    context: Dict[str, Any] = {}
+
+
+class ConceptSelectRequest(BaseModel):
+    concept_index: int = 0
+
+
+class MoodboardGenerateRequest(BaseModel):
+    project_id: str
+    concept_index: Optional[int] = 0
+    count: Optional[int] = 6
+    brief: Optional[str] = None
+    concept: Dict[str, Any] = {}
+
+
+class AssetGenerateRequest(BaseModel):
+    project_id: str
+    concept_index: Optional[int] = 0
+    prompt: Optional[str] = None
+    format: Optional[str] = None
+    size: Optional[str] = None
+    count: Optional[int] = 1
+    context: Dict[str, Any] = {}
+
+
+class PresentationBuildRequest(BaseModel):
+    project_id: str
+    concept_index: Optional[int] = 0
+    brand_logo_url: Optional[str] = None
+    template: Optional[str] = "premium pitch"
+    context: Dict[str, Any] = {}
+
+
 # =============================================================================
 # ACCOUNT, CREDIT, PACKAGE, AND AGENT REGISTRY
 # =============================================================================
@@ -216,6 +272,26 @@ except Exception:
 ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 AGENT_REGISTRY: Dict[str, Dict[str, Any]] = {}
+PROJECT_STORE: Dict[str, Dict[str, Any]] = {}
+PROJECT_ASSETS: Dict[str, List[Dict[str, Any]]] = {}
+PROJECT_JOBS: Dict[str, List[Dict[str, Any]]] = {}
+
+AGENT_HOURLY_RATES_INR: Dict[str, int] = {
+    "CONCEPT_AGENT": 3000,
+    "MOODBOARD_AGENT": 5000,
+    "GRAPHICS_2D_AGENT": 7000,
+    "RENDER_3D_AGENT": 10000,
+    "SOUND_AGENT": 5000,
+    "ELECTRIC_ENGINEER_AGENT": 5000,
+    "LIGHTING_AGENT": 5000,
+    "CAD_AGENT": 5000,
+    "AV_AGENT": 5000,
+    "SHOW_RUNNER_AGENT": 5000,
+    "PRESENTATION_AGENT": 7000,
+    "UCD_AGENT": 8000,
+}
+
+LOW_BALANCE_THRESHOLD = int(os.getenv("LOW_BALANCE_THRESHOLD", "1000"))
 
 PACKAGE_PLANS: List[Dict[str, Any]] = [
     {
@@ -378,6 +454,7 @@ def register_backend_agent(
     credit_cost: int = 25,
     category: str = "creative",
     enabled: bool = True,
+    hourly_rate_inr: Optional[int] = None,
 ) -> None:
     """Register an agent so the frontend can discover it automatically."""
     AGENT_REGISTRY[agent_id] = {
@@ -387,6 +464,7 @@ def register_backend_agent(
         "endpoint": endpoint,
         "capabilities": capabilities or [],
         "credit_cost": credit_cost,
+        "hourly_rate_inr": hourly_rate_inr if hourly_rate_inr is not None else AGENT_HOURLY_RATES_INR.get(agent_id, 0),
         "category": category,
         "enabled": enabled,
     }
@@ -406,9 +484,9 @@ def _register_default_agents() -> None:
         {
             "agent_id": "UCD_AGENT",
             "name": "Universal Creative Director / Orchestrator",
-            "description": "Main orchestration agent. Routes creative requests, asks missing questions, and coordinates all specialist agents.",
+            "description": "60-year senior creative director. Understands the brief, asks missing questions, fixes deliverables and budget logic, then supervises every specialist agent step by step.",
             "endpoint": "/ucd/chat",
-            "capabilities": ["brief", "concept", "handoff", "orchestration", "agent-routing"],
+            "capabilities": ["brief", "concept", "handoff", "orchestration", "agent-routing", "budget-thinking", "human-chat"],
             "credit_cost": 15,
             "category": "orchestrator",
         },
@@ -424,25 +502,25 @@ def _register_default_agents() -> None:
         {
             "agent_id": "CONCEPT_AGENT",
             "name": "Concept Agent",
-            "description": "Creates multiple creative concepts, rationale, guest journey, hero moments, and department logic.",
+            "description": "45-year senior creative director. Creates multiple radically different creative routes for events, exhibitions, weddings, activations, concerts, launches, corporate events, birthdays, and any experience-led brief.",
             "endpoint": "/agents/run",
-            "capabilities": ["concept", "creative-routes", "guest-journey", "hero-moments"],
+            "capabilities": ["concept", "creative-routes", "guest-journey", "hero-moments", "cross-industry-thinking", "distinct-options"],
             "credit_cost": 60,
             "category": "creative",
         },
         {
             "agent_id": "MOODBOARD_AGENT",
             "name": "Moodboard Agent",
-            "description": "Creates visual direction, style references, moodboard frames, prompts, and image-generation handoff.",
+            "description": "45-year creative director for moodboards. Explains mood, materials, lighting, ambience, seating, stage look, textures, palette and why each visual is right for the chosen concept.",
             "endpoint": "/api/moodboard/generate",
-            "capabilities": ["moodboard", "visual-direction", "image-prompts", "references"],
+            "capabilities": ["moodboard", "visual-direction", "image-prompts", "references", "materials", "lighting", "ambience"],
             "credit_cost": 120,
             "category": "visual",
         },
         {
             "agent_id": "GRAPHICS_2D_AGENT",
-            "name": "2D Graphics Agent",
-            "description": "Generates key visual direction, stage graphics, invites, print collateral, wayfinding, and screen graphics prompts.",
+            "name": "2D Graphics Art Director",
+            "description": "45-year art director. Creates invite copy, registration backdrop, table facade, stage backdrop, key visual, print sizes, screen graphics and brand copy guidance.",
             "endpoint": "/agents/run",
             "capabilities": ["2d", "graphics", "key-visual", "print", "screen-content", "wayfinding"],
             "credit_cost": 100,
@@ -450,10 +528,10 @@ def _register_default_agents() -> None:
         },
         {
             "agent_id": "RENDER_3D_AGENT",
-            "name": "3D Render Agent",
-            "description": "Generates 3D render briefs, scene prompts, spatial visualization instructions, and production render handoff.",
+            "name": "3D Render Design Agent",
+            "description": "40-year 3D designer. Designs contemporary, complicated structures with accurate dimensions from CAD, stage/exhibition/wedding/event geometry and render handoff.",
             "endpoint": "/agents/run",
-            "capabilities": ["3d", "renders", "scene-prompts", "spatial-visualization", "render-handoff"],
+            "capabilities": ["3d", "renders", "scene-prompts", "spatial-visualization", "render-handoff", "dimension-accuracy", "structures"],
             "credit_cost": 180,
             "category": "visual",
         },
@@ -486,12 +564,30 @@ def _register_default_agents() -> None:
         },
         {
             "agent_id": "LIGHTING_AGENT",
-            "name": "Lighting Agent",
+            "name": "Senior Lighting Designer",
             "description": "Creates lighting design direction, scene looks, cue stacks, reveal moments, and fixture logic.",
             "endpoint": "/agents/run",
             "capabilities": ["lighting", "cues", "fixture-logic", "reveal", "atmosphere"],
             "credit_cost": 90,
             "category": "production",
+        },
+        {
+            "agent_id": "ELECTRIC_ENGINEER_AGENT",
+            "name": "Electric Engineer",
+            "description": "Plans power distribution, DB positions, cable routes, load notes, safety checks and electrical coordination.",
+            "endpoint": "/agents/run",
+            "capabilities": ["electrical", "power", "db", "cable-routes", "load-calculation"],
+            "credit_cost": 90,
+            "category": "production",
+        },
+        {
+            "agent_id": "PRESENTATION_AGENT",
+            "name": "Client Pitch Presentation Agent",
+            "description": "Senior presentation creator and content writer. Builds client-pitch decks with brief summary, concept story, moodboard, 2D, 3D, flow, logo/template placement and persuasive presenter copy.",
+            "endpoint": "/projects/{project_id}/presentation/build",
+            "capabilities": ["presentation", "pitch-deck", "content-writing", "client-story", "ppt"],
+            "credit_cost": 120,
+            "category": "export",
         },
         {
             "agent_id": "SHOW_RUNNER_AGENT",
@@ -523,18 +619,33 @@ _register_default_agents()
 def _account_agent_reply(user_id: str, message: str) -> Dict[str, Any]:
     acct = _ensure_account(user_id)
     text = (message or "").lower()
+    low_balance = int(acct.get("credit_balance", 0)) <= LOW_BALANCE_THRESHOLD
     if any(w in text for w in ["package", "plan", "upgrade", "price", "pay", "institution", "individual"]):
         msg = (
             "Here are the available packages. Individuals usually start with Individual Pro; "
             "institutions should compare Institution Team and Enterprise based on team size and monthly generation volume."
         )
-        return {"message": msg, "account": acct, "packages": PACKAGE_PLANS, "action": "show_packages"}
-    if any(w in text for w in ["ledger", "history", "usage", "spent"]):
-        return {"message": "Here is your credit usage history.", "account": acct, "ledger": CREDIT_LEDGER.get(user_id, [])[-50:], "action": "show_ledger"}
+        return {"message": msg, "account": acct, "packages": PACKAGE_PLANS, "hourly_rates_inr": AGENT_HOURLY_RATES_INR, "low_balance": low_balance, "action": "show_packages"}
+    if any(w in text for w in ["ledger", "history", "usage", "spent", "rate", "rates", "cost"]):
+        return {
+            "message": "Here is your credit usage history and the current agent hourly rate card.",
+            "account": acct,
+            "ledger": CREDIT_LEDGER.get(user_id, [])[-50:],
+            "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+            "low_balance": low_balance,
+            "low_balance_threshold": LOW_BALANCE_THRESHOLD,
+            "action": "show_ledger",
+        }
     return {
-        "message": f"Your current credit balance is {acct['credit_balance']} tokens on {acct['plan_name']}.",
+        "message": (
+            f"Your current credit balance is {acct['credit_balance']} tokens on {acct['plan_name']}. "
+            + ("Your balance is low, so please recharge or top up before starting heavy creative jobs." if low_balance else "I will keep refreshing this while agents work.")
+        ),
         "account": acct,
         "packages": PACKAGE_PLANS,
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+        "low_balance": low_balance,
+        "low_balance_threshold": LOW_BALANCE_THRESHOLD,
         "action": "show_balance",
     }
 
@@ -547,6 +658,469 @@ def _dump_model(model: Any) -> Dict[str, Any]:
     if hasattr(model, "dict"):
         return model.dict()
     return dict(model)
+
+
+# =============================================================================
+# BRIEFCRAFT CREATIVE ENGINE
+# =============================================================================
+CREATIVE_INDUSTRIES = {
+    "wedding": ["wedding", "sangeet", "mehendi", "reception", "haldi", "mandap"],
+    "exhibition": ["exhibition", "expo", "stall", "booth", "pavilion", "trade show"],
+    "concert": ["concert", "festival", "music", "artist", "gig", "performance"],
+    "corporate": ["corporate", "conference", "summit", "townhall", "award", "annual"],
+    "activation": ["activation", "mall", "roadshow", "launch", "sampling", "consumer"],
+    "birthday": ["birthday", "party", "kids", "anniversary"],
+    "event": ["event", "gala", "show", "experience", "ceremony"],
+}
+
+CONCEPT_ARCHETYPES = [
+    {
+        "key": "cinematic_reveal",
+        "name": "Cinematic Reveal Theatre",
+        "logic": "a tightly scripted arrival-to-reveal journey with one unforgettable hero moment",
+        "spatial": "central stage, controlled sightlines, strong reveal aperture, layered audience focus",
+    },
+    {
+        "key": "immersive_district",
+        "name": "Immersive Brand District",
+        "logic": "a walk-through experience where every zone tells a different part of the story",
+        "spatial": "entry portal, gallery moments, interaction zones, social-content anchors",
+    },
+    {
+        "key": "living_gallery",
+        "name": "Living Gallery of Moments",
+        "logic": "an editorial, art-gallery style experience where guests move through composed scenes",
+        "spatial": "modular scenic frames, slow discovery path, curated seating and photo compositions",
+    },
+    {
+        "key": "ritual_celebration",
+        "name": "Ritual-Led Celebration",
+        "logic": "a human-centered ceremony or hospitality experience built around emotion and belonging",
+        "spatial": "warm arrival, central ritual zone, layered lounges, family/VIP hospitality clusters",
+    },
+    {
+        "key": "future_lab",
+        "name": "Future Lab Experience",
+        "logic": "a technology-led lab or innovation narrative with interactive reveals and luminous surfaces",
+        "spatial": "LED portals, demo islands, kinetic light, high-contrast stage geometry",
+    },
+    {
+        "key": "marketplace_festival",
+        "name": "Premium Festival Marketplace",
+        "logic": "a high-energy multi-touchpoint format mixing entertainment, food, product and social scenes",
+        "spatial": "activity pods, performance pocket, hospitality lane, signage spine, photo-stop clusters",
+    },
+    {
+        "key": "monumental_installation",
+        "name": "Monumental Installation Story",
+        "logic": "a sculptural center-piece drives the entire experience and becomes the visual memory",
+        "spatial": "large central form, radial circulation, layered viewing points, controlled lighting focus",
+    },
+]
+
+MOODBOARD_LENSES = [
+    ("Mood & Emotion", "the emotional temperature, pacing and guest feeling"),
+    ("Material Palette", "surface finishes, textures, structural finishes and tactile cues"),
+    ("Lighting & Ambience", "key light, fill, practical glow, haze, temperature and reveal states"),
+    ("Seating & Guest Comfort", "seating posture, lounges, VIP clusters, dining or audience ergonomics"),
+    ("Stage / Spatial Look", "stage language, scenic objects, portal, backdrop and focal hierarchy"),
+    ("Brand / Graphic Behaviour", "logo hierarchy, typography scale, signage, invitation and backdrop logic"),
+]
+
+
+def _stable_seed(*parts: Any) -> int:
+    raw = "||".join(str(p or "") for p in parts)
+    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _rng_for(*parts: Any) -> random.Random:
+    return random.Random(_stable_seed(*parts))
+
+
+def _public_url(path: str) -> str:
+    host = RENDER_DOMAIN
+    scheme = "https" if host and host != "localhost:8000" else "http"
+    return f"{scheme}://{host}/{path.lstrip('/')}"
+
+
+def _safe_title(text: str, fallback: str = "Creative Project") -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return fallback
+    text = re.split(r"[.!?\n]", text)[0].strip()
+    return (text[:82].rstrip() + "…") if len(text) > 84 else text
+
+
+def _detect_industry(brief: str) -> str:
+    low = (brief or "").lower()
+    for industry, words in CREATIVE_INDUSTRIES.items():
+        if any(w in low for w in words):
+            return industry
+    return "event"
+
+
+def _extract_guest_count(brief: str) -> Optional[str]:
+    m = re.search(r"\b(\d{2,6})\s*(pax|people|guests|attendees|audience|seats)\b", brief or "", re.I)
+    return f"{m.group(1)} {m.group(2)}" if m else None
+
+
+def _extract_dimensions(brief: str) -> Optional[str]:
+    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(m|meter|meters|ft|feet|mm|in)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(m|meter|meters|ft|feet|mm|in)?\b", brief or "", re.I)
+    if not m:
+        return None
+    return f"{m.group(1)} x {m.group(3)} {m.group(4) or m.group(2) or 'm'}"
+
+
+def _extract_budget(brief: str, fallback: Optional[str] = None) -> str:
+    m = re.search(r"\b(?:budget|cost|spend)\D{0,10}([\d,.]+)\s*(lakh|lakhs|cr|crore|k|rs|inr|aed|usd)?", brief or "", re.I)
+    if m:
+        return " ".join(x for x in m.groups() if x)
+    return fallback or "Budget to be confirmed"
+
+
+def _missing_brief_questions(brief: str) -> List[str]:
+    checks = [
+        (r"\b\d{2,6}\s*(pax|people|guests|attendees|audience|seats)\b", "How many guests / visitors / seats should I plan for?"),
+        (r"\b\d+(?:\.\d+)?\s*(m|meter|meters|ft|feet|mm|in)?\s*[x×]\s*\d+", "What are the final venue or stall dimensions?"),
+        (r"\b(budget|cost|spend|lakh|crore|premium|luxury|standard)\b", "What budget level should I assume: luxury, premium, standard or cost-controlled?"),
+        (r"\b(logo|brand|guideline|palette|sponsor|copy|content)\b", "Do you have brand guidelines, logo files, mandatory copy or sponsor hierarchy?"),
+        (r"\b(date|time|schedule|duration|show|opening|closing)\b", "What is the date, guest arrival time, show time and total duration?"),
+        (r"\b(deliverable|moodboard|2d|3d|cad|sound|lighting|presentation|deck|layout)\b", "Which deliverables do you need: concepts, moodboard, 2D, 3D, CAD, sound, lighting, show runner, presentation or downloads?"),
+    ]
+    out = [q for pat, q in checks if not re.search(pat, brief or "", re.I)]
+    return out[:5]
+
+
+def _brief_context(brief: str, req: Optional[ProjectRunRequest] = None) -> Dict[str, Any]:
+    industry = _detect_industry(brief)
+    return {
+        "title": _safe_title(brief, "Production-Ready Creative Brief"),
+        "industry": industry,
+        "guest_count": _extract_guest_count(brief) or "To be confirmed",
+        "dimensions": _extract_dimensions(brief) or "To be confirmed",
+        "budget": _extract_budget(brief, getattr(req, "budget_range", None) if req else None),
+        "style_direction": (getattr(req, "style_direction", None) if req else None) or "Premium creative",
+        "event_type": (getattr(req, "event_type", None) if req else None) or industry,
+        "missing_questions": _missing_brief_questions(brief),
+        "user_name": (getattr(req, "user_name", None) if req else None) or "there",
+    }
+
+
+def _creative_director_prompt(role: str, years: int, industry: str) -> str:
+    return (
+        f"You are a {years}-year senior {role} for {industry}, events, exhibitions, weddings, "
+        "activations, concerts, corporate events, parties and brand experiences. Think like a real "
+        "creative director: first understand the brief, then make precise, executable, emotionally "
+        "strong decisions. Do not reuse generic concepts. Each output must feel brief-specific, "
+        "commercially useful and production-aware."
+    )
+
+
+def _generate_concepts(brief: str, ctx: Dict[str, Any], count: int = 3) -> List[Dict[str, Any]]:
+    rng = _rng_for("concepts", brief, ctx.get("industry"), ctx.get("style_direction"))
+    archetypes = CONCEPT_ARCHETYPES[:]
+    rng.shuffle(archetypes)
+    selected = archetypes[:max(3, min(5, count))]
+    verbs = ["orchestrates", "transforms", "stages", "curates", "dramatizes", "humanises", "amplifies"]
+    material_sets = [
+        ["brushed metal", "ribbed glass", "deep velvet", "warm champagne trims"],
+        ["raw timber", "limewash texture", "linen drape", "soft brass accents"],
+        ["mirror acrylic", "translucent polycarbonate", "pixel LED", "black gloss floor"],
+        ["handcrafted floral structures", "embroidered textiles", "warm wood", "ceramic details"],
+        ["modular truss skin", "mesh fabric", "neon edge light", "matte graphite surfaces"],
+    ]
+    concepts: List[Dict[str, Any]] = []
+    for i, arch in enumerate(selected):
+        verb = rng.choice(verbs)
+        materials = material_sets[(i + rng.randrange(len(material_sets))) % len(material_sets)]
+        name = f"{arch['name']} — {ctx['title'][:34].strip()}"
+        one_liner = (
+            f"A {ctx['style_direction']} {ctx['industry']} direction that {verb} the brief through "
+            f"{arch['logic']}."
+        )
+        flow = [
+            f"Arrival: a clear first-view moment establishes {ctx['style_direction']} tone and guest orientation.",
+            f"Build-up: guests move through {arch['spatial']} with a controlled rhythm.",
+            "Hero moment: lighting, sound, scenic structure and screen content converge into one memorable peak.",
+            "After-moment: hospitality, photo capture and interaction zones convert the concept into social memory.",
+        ]
+        concepts.append({
+            "id": f"concept_{i+1}_{arch['key']}",
+            "name": name,
+            "title": name,
+            "style": arch["name"],
+            "one_liner": one_liner,
+            "summary": one_liner,
+            "big_idea": (
+                f"The concept takes the user brief and turns it into {arch['logic']}. "
+                f"It avoids generic decor by giving every department one shared story: "
+                f"{ctx['industry']} guests should feel the experience building from arrival to a designed peak."
+            ),
+            "why_best": (
+                "This route is strong because it is creatively distinctive, still executable, and gives CAD, "
+                "2D, 3D, lighting, sound and show-running a clear production brief. It can scale up or down "
+                f"depending on the budget ({ctx['budget']})."
+            ),
+            "experience_flow": flow,
+            "design_language": (
+                f"{', '.join(materials)} with a {ctx['style_direction']} palette, controlled negative space, "
+                "clear brand hierarchy and stage-picture discipline."
+            ),
+            "materials": materials,
+            "hero_moments": [
+                "First-look entry composition",
+                "Main reveal or central ceremony peak",
+                "High-value photo / social capture moment",
+            ],
+            "cad_direction": (
+                f"Plan dimensions around {ctx['dimensions']}. Reserve clean guest flow, FOH sightline, "
+                "BOH/service access, power routes and stage/feature object footprint before 3D starts."
+            ),
+            "graphics_2d_brief": {
+                "invite_copy": f"You are invited to experience {ctx['title']}",
+                "registration_backdrop": "Large brand mark, concept pattern, directional welcome copy and sponsor lockup.",
+                "table_facade": "Low-height branded facade with premium material texture and subtle edge lighting.",
+                "stage_backdrop": "Hero concept title, layered depth graphics and screen-safe logo hierarchy.",
+                "sizes": ["Invite 1080x1920", "Backdrop 16ft x 8ft", "Table facade 8ft x 3ft", "Stage backdrop as per CAD"],
+            },
+            "render_3d_brief": (
+                "Use CAD dimensions first. Model main scenic geometry, entry, seating/audience zones, "
+                "stage or booth structure, lighting truss positions and camera-safe hero views."
+            ),
+            "lighting_brief": "Use warm key/fill for premium emotion, sharper moving light at reveal, practical glow in guest zones and dimmable states for show flow.",
+            "sound_brief": "Build subtle arrival ambience, gradual musical tension, hero stinger at reveal and controlled post-moment lounge bed.",
+            "production_watchouts": [
+                "Confirm venue ceiling height and rigging load.",
+                "Lock exact brand assets and mandatory copy.",
+                "Approve power, BOH and emergency access routes before render finalization.",
+            ],
+        })
+    return concepts
+
+
+def _build_structured_brief(brief: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": ctx["title"],
+        "industry": ctx["industry"],
+        "executive_summary": (
+            f"This is a {ctx['style_direction']} {ctx['industry']} brief. The UCD should first confirm "
+            "missing commercial and technical details, then create concepts, select deliverables, and supervise "
+            "specialist agents in a production-safe order."
+        ),
+        "objective": "Create a memorable, commercially useful, production-ready creative experience with clear deliverables and department handoffs.",
+        "guest_count": ctx["guest_count"],
+        "dimensions": ctx["dimensions"],
+        "budget": ctx["budget"],
+        "missing_questions": ctx["missing_questions"],
+        "recommended_deliverables": [
+            "Project Brief",
+            "Concepts",
+            "Mood Board",
+            "CAD Layout",
+            "2D Graphics",
+            "3D Renders",
+            "Lighting",
+            "Sound",
+            "Show Runner",
+            "Client Pitch Presentation",
+        ],
+        "agent_sequence": [
+            "UCD Agent confirms missing details, deliverables and budget thinking.",
+            "Concept Agent creates multiple different creative routes.",
+            "Moodboard Agent expands selected concept into visual/material/lighting ambience.",
+            "CAD Agent fixes dimensions and layout logic before 3D.",
+            "2D Art Director creates copy and graphics requirements.",
+            "3D Agent renders from CAD dimensions and concept geometry.",
+            "Lighting, Sound, Electrical and Show Runner agents finalize production details.",
+            "Presentation Agent packages everything for client pitch.",
+        ],
+        "original_brief": brief,
+    }
+
+
+def _svg_asset(project_id: str, title: str, subtitle: str, palette: List[str], section: str, idx: int) -> str:
+    fname = f"{project_id}_{section}_{idx}_{uuid.uuid4().hex[:8]}.svg"
+    path = Path(GENERATED_DIR) / fname
+    color_a = palette[0] if palette else "#0b0d14"
+    color_b = palette[1] if len(palette) > 1 else "#c9a84c"
+    color_c = palette[2] if len(palette) > 2 else "#f6d27a"
+    def x(v: Any) -> str:
+        return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    safe_section = x(section.upper())
+    safe_title = x(str(title)[:34])
+    safe_subtitle = x(str(subtitle)[:210])
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="{color_a}"/><stop offset="0.55" stop-color="{color_b}"/><stop offset="1" stop-color="{color_c}"/></linearGradient></defs>
+<rect width="1600" height="900" fill="#07080d"/>
+<rect x="48" y="48" width="1504" height="804" rx="34" fill="url(#g)" opacity="0.86"/>
+<circle cx="1260" cy="170" r="260" fill="#ffffff" opacity="0.08"/>
+<circle cx="250" cy="760" r="300" fill="#000000" opacity="0.20"/>
+<path d="M160 670 C420 450 640 740 890 470 C1100 245 1260 385 1450 245" fill="none" stroke="#fff7d6" stroke-width="10" opacity="0.34"/>
+<text x="110" y="180" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#fff7d6" letter-spacing="5">{safe_section}</text>
+<text x="110" y="295" font-family="Arial, sans-serif" font-size="74" font-weight="800" fill="#ffffff">{safe_title}</text>
+<foreignObject x="110" y="335" width="1180" height="240"><div xmlns="http://www.w3.org/1999/xhtml" style="font: 34px Arial, sans-serif; line-height:1.35; color:#fff7d6;">{safe_subtitle}</div></foreignObject>
+<text x="110" y="800" font-family="Arial, sans-serif" font-size="24" fill="#fff7d6" opacity="0.82">BriefCraftAI Creative Engine</text>
+</svg>"""
+    path.write_text(svg, encoding="utf-8")
+    return _public_url(f"media/generated/{fname}")
+
+
+def _store_asset(project_id: str, section: str, asset_type: str, title: str, description: str, url: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    asset = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "section": section,
+        "asset_type": asset_type,
+        "title": title,
+        "description": description,
+        "prompt": description,
+        "status": "ready",
+        "preview_url": url,
+        "master_url": url,
+        "source_file_url": url,
+        "created_at": time.time(),
+        "meta": meta or {},
+    }
+    PROJECT_ASSETS.setdefault(project_id, []).append(asset)
+    return asset
+
+
+def _selected_concept(project_id: str, concept_index: Optional[int] = 0) -> Dict[str, Any]:
+    project = PROJECT_STORE.get(project_id, {})
+    concepts = project.get("concepts") or []
+    idx = concept_index if concept_index is not None else project.get("selected_concept_index", 0)
+    try:
+        idx = max(0, min(len(concepts) - 1, int(idx)))
+    except Exception:
+        idx = 0
+    return concepts[idx] if concepts else {}
+
+
+def _build_moodboard_assets(project_id: str, concept_index: int = 0, count: int = 6) -> List[Dict[str, Any]]:
+    concept = _selected_concept(project_id, concept_index)
+    rng = _rng_for("moodboard", project_id, concept.get("name"), count)
+    palettes = [
+        ["#111827", "#c9a84c", "#f6d27a"],
+        ["#141414", "#7b2d26", "#f4c6a6"],
+        ["#08111f", "#3aa6ff", "#d8f2ff"],
+        ["#102015", "#7bb274", "#dceecf"],
+        ["#210b2c", "#c14a5a", "#ffd6df"],
+    ]
+    frames: List[Dict[str, Any]] = []
+    details = [
+        ("Overall Mood", "sets the emotional climate and first visual promise"),
+        ("Materials", "translates concept into tactile finishes and structural surfaces"),
+        ("Lighting", "defines contrast, reveal cue, warmth, shadow and ambience"),
+        ("Seating", "shows guest comfort, VIP hierarchy and social behaviour"),
+        ("Stage Look", "explains backdrop, scenic volume, screen focus and focal depth"),
+        ("Brand Details", "shows logo behaviour, typography, facade, invitation and wayfinding tone"),
+    ][: max(1, min(8, count))]
+    for i, (title, role) in enumerate(details):
+        palette = palettes[(i + rng.randrange(len(palettes))) % len(palettes)]
+        desc = (
+            f"{title} for {concept.get('name', 'selected concept')}: this frame {role}. "
+            f"It is best for the concept because it supports: {concept.get('why_best', concept.get('summary', 'the creative route'))}"
+        )
+        url = _svg_asset(project_id, title, desc, palette, "moodboard", i + 1)
+        frames.append(_store_asset(project_id, "moodboard", "moodboard", title, desc, url, {
+            "concept_index": concept_index,
+            "mood": title,
+            "creative_director_note": desc,
+        }))
+    return frames
+
+
+def _build_2d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, Any]]:
+    concept = _selected_concept(project_id, concept_index)
+    briefs = concept.get("graphics_2d_brief") or {}
+    outputs = [
+        ("Invite / Digital Save-the-Date", briefs.get("invite_copy", "Premium invitation headline and event details")),
+        ("Registration Backdrop", briefs.get("registration_backdrop", "Welcome backdrop with brand hierarchy")),
+        ("Table Facade", briefs.get("table_facade", "Reception desk facade with material and lighting detail")),
+        ("Stage Backdrop", briefs.get("stage_backdrop", "Main stage graphic system and LED-safe composition")),
+    ]
+    assets = []
+    for i, (title, desc) in enumerate(outputs):
+        url = _svg_asset(project_id, title, desc, ["#0b0d14", "#c9a84c", "#ffffff"], "2d_graphics", i + 1)
+        assets.append(_store_asset(project_id, "2d_graphics", "2d_graphic", title, desc, url, {
+            "concept_index": concept_index,
+            "art_director_note": "45-year art director output: copy, hierarchy, size and material logic included.",
+            "sizes": briefs.get("sizes", []),
+        }))
+    return assets
+
+
+def _build_3d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, Any]]:
+    concept = _selected_concept(project_id, concept_index)
+    views = [
+        ("Entry Portal 3D View", "dimensioned first-view arrival portal based on CAD flow"),
+        ("Main Stage 3D View", "stage/backdrop/LED/scenic structure with accurate footprint from CAD"),
+        ("Experience Zone 3D View", "guest interaction zone with seating, circulation and light mood"),
+    ]
+    assets = []
+    for i, (title, desc) in enumerate(views):
+        full_desc = f"{desc}. 3D agent must follow CAD dimensions first: {concept.get('cad_direction', 'confirm dimensions before render')}."
+        url = _svg_asset(project_id, title, full_desc, ["#07111f", "#3a6bff", "#dbeafe"], "renders", i + 1)
+        assets.append(_store_asset(project_id, "renders", "3d_render", title, full_desc, url, {
+            "concept_index": concept_index,
+            "render_agent_note": concept.get("render_3d_brief", ""),
+        }))
+    return assets
+
+
+def _department_outputs(project_id: str, concept_index: int = 0) -> Dict[str, Any]:
+    concept = _selected_concept(project_id, concept_index)
+    return {
+        "sound_data": {
+            "designer": "Senior sound engineer",
+            "direction": concept.get("sound_brief", ""),
+            "cue_logic": ["arrival bed", "anticipation build", "hero stinger", "post-reveal lounge bed"],
+            "mic_plan": "Confirm MC, presenter, panel and backup microphone count.",
+        },
+        "lighting_data": {
+            "designer": "Senior lighting designer",
+            "direction": concept.get("lighting_brief", ""),
+            "looks": ["arrival warmth", "brand wash", "reveal contrast", "photo moment glow"],
+            "notes": "Confirm rigging height, fixture inventory, haze permission and power load.",
+        },
+        "showrunner_data": {
+            "show_caller": "Senior show runner",
+            "run_of_show": [
+                "Guest arrival and holding ambience",
+                "Opening cue and host welcome",
+                "Concept story / brand introduction",
+                "Hero reveal / central moment",
+                "Guest interaction and closing handover",
+            ],
+            "backstage_notes": "Lock cue numbers only after final venue tech check.",
+        },
+        "electrical_data": {
+            "engineer": "Electric engineer",
+            "scope": "DB positions, power routing, emergency clearance, LED/stage/sound load assumptions.",
+            "watchouts": ["separate sound and lighting power where possible", "protect guest cable crossings", "confirm generator backup"],
+        },
+    }
+
+
+def _presentation_deck(project_id: str, concept_index: int = 0) -> Dict[str, Any]:
+    project = PROJECT_STORE.get(project_id, {})
+    concept = _selected_concept(project_id, concept_index)
+    brief = project.get("structured_brief", {})
+    return {
+        "title": f"Client Pitch — {project.get('project_name', 'Creative Experience')}",
+        "template": "premium dark-gold pitch",
+        "slides": [
+            {"title": "Brief Summary", "body": brief.get("executive_summary", project.get("brief", ""))},
+            {"title": "Creative Challenge", "body": "Turn the client ask into a memorable, executable and commercially valuable experience."},
+            {"title": f"Concept: {concept.get('name', 'Selected Concept')}", "body": concept.get("big_idea", "")},
+            {"title": "Mood & Material Direction", "body": "Palette, ambience, materials, lighting, seating and stage treatment from the moodboard agent."},
+            {"title": "2D / Brand Graphics", "body": json.dumps(concept.get("graphics_2d_brief", {}), ensure_ascii=False)},
+            {"title": "CAD to 3D Logic", "body": concept.get("cad_direction", "")},
+            {"title": "Show Flow", "body": "Arrival, build-up, hero moment, interaction and closing handover."},
+            {"title": "Production Notes", "body": "; ".join(concept.get("production_watchouts", []))},
+        ],
+        "presenter_note": "Speak like a senior creative presenter: clear, persuasive, never over-explain, and always connect each output back to the client objective.",
+    }
 
 # =============================================================================
 # TEXT UTILITIES
@@ -794,6 +1368,18 @@ def _ucd_detect_intent(message: str, file_meta: Optional[UCDFileMeta] = None) ->
         if any(word in text for word in {"trace", "convert", "upload", "image", "file", "pdf", "dwg", "dxf"}):
             return "cad_trace_file"
         return "cad_generate_layout"
+    if any(word in text for word in {"concept", "idea", "creative route", "theme", "story"}) and "mood" not in text:
+        return "concept_strategy"
+    if any(word in text for word in {"moodboard", "mood board", "materials", "ambience", "palette"}):
+        return "moodboard_direction"
+    if any(word in text for word in {"invite", "backdrop", "facade", "key visual", "2d", "graphic"}):
+        return "graphics_2d_direction"
+    if any(word in text for word in {"3d", "render", "structure", "sketchup", "spatial"}):
+        return "render_3d_direction"
+    if any(word in text for word in {"presentation", "pitch", "deck", "ppt", "proposal"}):
+        return "presentation_direction"
+    if any(word in text for word in {"deliverable", "deliverables", "budget", "brief", "requirement", "requirements"}):
+        return "brief_orchestration"
     if any(word in text for word in {"help", "how", "what", "can you"}):
         return "general_help"
     return "conversation"
@@ -865,13 +1451,25 @@ def _ucd_human_message(intent: str, questions: List[str], has_file: bool) -> str
     if intent == "cad_generate_layout":
         return "I will create a professional CAD layout from your brief and show the CAD workspace full screen while it is generated."
     if intent == "general_help":
-        return "Tell me what you want to create or upload a layout/image, and I will guide it into the right CAD workflow."
-    return "I am here with you. Tell me what you want to build, convert, trace, or improve."
+        return "Tell me what you want to create, improve or upload, and I will route it to the right specialist agent."
+    if intent == "concept_strategy":
+        return "I will treat this like a senior creative director: first I will understand the brief, then create multiple concept routes that are genuinely different from each other."
+    if intent == "moodboard_direction":
+        return "I will build the moodboard around the selected concept with detailed logic for mood, material, lighting, ambience, seating and stage look."
+    if intent == "graphics_2d_direction":
+        return "I will brief the 2D art director with exact outputs, copy direction, size logic and visual hierarchy."
+    if intent == "render_3d_direction":
+        return "I will make CAD and dimensions guide the 3D render agent before any spatial design is visualized."
+    if intent == "presentation_direction":
+        return "I will package the brief, concept, moodboard, 2D, 3D and flow into a client-ready pitch presentation."
+    if intent == "brief_orchestration":
+        return "I will first clarify the brief, missing details, deliverables and budget thinking, then start the agents in the correct order."
+    return "I am here with you. Tell me what you want to build, convert, trace, improve, or present."
 
 def _ucd_response(req: UCDChatRequest) -> UCDChatResponse:
     sid = _ucd_session_id(req.session_id)
     intent = _ucd_detect_intent(req.message, req.file)
-    questions = _ucd_missing_for_cad(intent, req.message, req.file) if intent.startswith("cad_") else []
+    questions = _ucd_missing_for_cad(intent, req.message, req.file) if intent.startswith("cad_") else _missing_brief_questions(req.message or "")
     has_file = req.file is not None
     ui: Dict[str, Any] = {}
     agent: Dict[str, Any] = {}
@@ -888,6 +1486,30 @@ def _ucd_response(req: UCDChatRequest) -> UCDChatResponse:
         else:
             next_actions.append({"type": "open_cad_fullscreen"})
             next_actions.append({"type": "send_to_agent", "agent": "CAD_AGENT", "endpoint": "/api/cad/pro/generate"})
+    elif intent in {"concept_strategy", "brief_orchestration", "conversation"}:
+        agent = {
+            "target_agent": "CONCEPT_AGENT",
+            "supervised_by": "UCD_AGENT",
+            "instruction": _creative_director_prompt("Concept Agent", 45)
+            + " Generate at least three very different concept routes; no repeated generic fallbacks.",
+            "preferred_endpoint": "/projects/{project_id}/run",
+        }
+        if questions:
+            next_actions.append({"type": "ask_user", "questions": questions})
+        next_actions.append({"type": "send_to_agent", "agent": "CONCEPT_AGENT", "endpoint": "/projects/{project_id}/run"})
+    elif intent == "moodboard_direction":
+        agent = {"target_agent": "MOODBOARD_AGENT", "supervised_by": "UCD_AGENT", "preferred_endpoint": "/api/moodboard/generate"}
+        next_actions.append({"type": "send_to_agent", "agent": "MOODBOARD_AGENT", "endpoint": "/api/moodboard/generate"})
+    elif intent == "graphics_2d_direction":
+        agent = {"target_agent": "GRAPHICS_2D_AGENT", "supervised_by": "UCD_AGENT", "preferred_endpoint": "/ai/generate-2d"}
+        next_actions.append({"type": "send_to_agent", "agent": "GRAPHICS_2D_AGENT", "endpoint": "/ai/generate-2d"})
+    elif intent == "render_3d_direction":
+        agent = {"target_agent": "RENDER_3D_AGENT", "supervised_by": "UCD_AGENT", "preferred_endpoint": "/projects/{project_id}/renders/generate-separated"}
+        next_actions.append({"type": "send_to_agent", "agent": "CAD_AGENT", "endpoint": "/api/cad/pro/generate"})
+        next_actions.append({"type": "send_to_agent", "agent": "RENDER_3D_AGENT", "endpoint": "/projects/{project_id}/renders/generate-separated"})
+    elif intent == "presentation_direction":
+        agent = {"target_agent": "PRESENTATION_AGENT", "supervised_by": "UCD_AGENT", "preferred_endpoint": "/projects/{project_id}/presentation/build"}
+        next_actions.append({"type": "send_to_agent", "agent": "PRESENTATION_AGENT", "endpoint": "/projects/{project_id}/presentation/build"})
 
     response = UCDChatResponse(
         session_id=sid,
@@ -1627,7 +2249,257 @@ def list_agents():
     return {
         "ok": True,
         "agents": sorted(AGENT_REGISTRY.values(), key=lambda a: (a.get("category", ""), a.get("name", ""))),
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
     }
+
+
+@app.post("/projects")
+def create_project(req: ProjectCreateRequest):
+    brief = (req.brief or req.brief_text or "").strip()
+    project_id = str(uuid.uuid4())
+    now = time.time()
+    project = {
+        "id": project_id,
+        "project_id": project_id,
+        "project_name": req.project_name or req.title or _safe_title(brief, "New Creative Project"),
+        "title": req.title or req.project_name or _safe_title(brief, "New Creative Project"),
+        "brief": brief,
+        "event_type": req.event_type or _detect_industry(brief),
+        "style_direction": req.style_direction or "Premium creative",
+        "status": "draft",
+        "concepts": [],
+        "selected_concept_index": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    PROJECT_STORE[project_id] = project
+    PROJECT_ASSETS.setdefault(project_id, [])
+    PROJECT_JOBS.setdefault(project_id, [])
+    return project
+
+
+@app.get("/projects")
+def list_projects():
+    projects = sorted(PROJECT_STORE.values(), key=lambda p: p.get("updated_at", 0), reverse=True)
+    return {"ok": True, "projects": projects}
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: str):
+    project = PROJECT_STORE.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project": project}
+
+
+@app.post("/projects/{project_id}/run")
+def run_project_pipeline(
+    project_id: str,
+    req: ProjectRunRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    project = PROJECT_STORE.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    brief = (req.brief or req.text or project.get("brief") or "").strip()
+    if not brief:
+        raise HTTPException(status_code=400, detail="Brief text is required.")
+    ctx = _brief_context(brief, req)
+    structured = _build_structured_brief(brief, ctx)
+    concepts = _generate_concepts(brief, ctx, count=3)
+    project.update({
+        "brief": brief,
+        "event_type": ctx["event_type"],
+        "style_direction": ctx["style_direction"],
+        "structured_brief": structured,
+        "analysis": structured["executive_summary"],
+        "concepts": concepts,
+        "concept_options": concepts,
+        "status": "concepts_ready",
+        "updated_at": time.time(),
+    })
+    PROJECT_JOBS.setdefault(project_id, []).append({
+        "id": str(uuid.uuid4()),
+        "job_kind": "concept",
+        "section": "concepts",
+        "status": "completed",
+        "progress": 100,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    })
+    user_id = _account_user_id(request, x_user_id=x_user_id, authorization=authorization)
+    acct = _consume_credits(user_id, AGENT_REGISTRY["CONCEPT_AGENT"]["credit_cost"], "Concept generation", agent_id="CONCEPT_AGENT", project_id=project_id)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "analysis": structured["executive_summary"],
+        "structured_brief": structured,
+        "concepts": concepts,
+        "concept_options": concepts,
+        "missing_questions": ctx["missing_questions"],
+        "ucd_message": (
+            f"{ctx['user_name']}, I have understood the brief at a senior creative director level. "
+            "Please review the missing questions, confirm deliverables and choose the concept route before I send work to specialist agents."
+        ),
+        "account": acct,
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+    }
+
+
+@app.get("/projects/{project_id}/concepts")
+def get_project_concepts(project_id: str):
+    project = PROJECT_STORE.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "concepts": project.get("concepts", [])}
+
+
+@app.post("/projects/{project_id}/select-concept")
+def select_project_concept(project_id: str, req: ConceptSelectRequest):
+    project = PROJECT_STORE.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    concepts = project.get("concepts") or []
+    if not concepts:
+        raise HTTPException(status_code=400, detail="No concepts generated yet.")
+    idx = max(0, min(len(concepts) - 1, int(req.concept_index)))
+    project["selected_concept_index"] = idx
+    project["selected_concept"] = concepts[idx]
+    project["status"] = "concept_selected"
+    project["updated_at"] = time.time()
+    return {"ok": True, "project_id": project_id, "selected_concept_index": idx, "selected_concept": concepts[idx]}
+
+
+@app.get("/projects/{project_id}/assets")
+def list_project_assets(project_id: str, section: Optional[str] = None):
+    assets = PROJECT_ASSETS.get(project_id, [])
+    if section:
+        sec = section.lower()
+        assets = [a for a in assets if (a.get("section") or "").lower() == sec]
+    return {"ok": True, "assets": assets}
+
+
+@app.get("/projects/{project_id}/jobs")
+def list_project_jobs(project_id: str):
+    return {"ok": True, "jobs": PROJECT_JOBS.get(project_id, [])}
+
+
+@app.get("/api/projects/{project_id}/moodboard")
+def get_api_project_moodboard(project_id: str):
+    assets = [a for a in PROJECT_ASSETS.get(project_id, []) if a.get("section") == "moodboard"]
+    return {"ok": True, "project_id": project_id, "assets": assets, "moodboard": assets, "images": assets}
+
+
+@app.post("/api/moodboard/generate")
+def generate_moodboard(
+    req: MoodboardGenerateRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    if req.project_id not in PROJECT_STORE:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    user_id = _account_user_id(request, x_user_id=x_user_id, authorization=authorization)
+    acct = _consume_credits(user_id, AGENT_REGISTRY["MOODBOARD_AGENT"]["credit_cost"], "Moodboard generation", agent_id="MOODBOARD_AGENT", project_id=req.project_id)
+    PROJECT_JOBS.setdefault(req.project_id, []).append({
+        "id": str(uuid.uuid4()),
+        "job_kind": "moodboard",
+        "section": "moodboard",
+        "status": "completed",
+        "progress": 100,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    })
+    assets = _build_moodboard_assets(req.project_id, req.concept_index or 0, req.count or 6)
+    PROJECT_STORE[req.project_id]["updated_at"] = time.time()
+    return {
+        "ok": True,
+        "project_id": req.project_id,
+        "assets": assets,
+        "account": acct,
+        "message": "Moodboard generated by a 45-year creative director with detailed mood, material, lighting, ambience, seating and stage logic.",
+    }
+
+
+@app.post("/ai/generate-2d")
+def generate_2d_assets(
+    req: AssetGenerateRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    if req.project_id not in PROJECT_STORE:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    user_id = _account_user_id(request, x_user_id=x_user_id, authorization=authorization)
+    acct = _consume_credits(user_id, AGENT_REGISTRY["GRAPHICS_2D_AGENT"]["credit_cost"], "2D graphics generation", agent_id="GRAPHICS_2D_AGENT", project_id=req.project_id)
+    assets = _build_2d_assets(req.project_id, req.concept_index or 0)
+    PROJECT_JOBS.setdefault(req.project_id, []).append({
+        "id": str(uuid.uuid4()),
+        "job_kind": "2d_graphics",
+        "section": "2d_graphics",
+        "status": "completed",
+        "progress": 100,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    })
+    return {"ok": True, "project_id": req.project_id, "assets": assets, "account": acct}
+
+
+@app.post("/projects/{project_id}/renders/generate-separated")
+def generate_3d_renders(
+    project_id: str,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    if project_id not in PROJECT_STORE:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    user_id = _account_user_id(request, x_user_id=x_user_id, authorization=authorization)
+    acct = _consume_credits(user_id, AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", agent_id="RENDER_3D_AGENT", project_id=project_id)
+    idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
+    assets = _build_3d_assets(project_id, idx)
+    PROJECT_JOBS.setdefault(project_id, []).append({
+        "id": str(uuid.uuid4()),
+        "job_kind": "3d_renders",
+        "section": "renders",
+        "status": "completed",
+        "progress": 100,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    })
+    return {"ok": True, "project_id": project_id, "assets": assets, "account": acct}
+
+
+@app.post("/project/{project_id}/departments/build")
+def build_departments(project_id: str):
+    if project_id not in PROJECT_STORE:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
+    outputs = _department_outputs(project_id, idx)
+    PROJECT_STORE[project_id].update(outputs)
+    PROJECT_STORE[project_id]["department_outputs"] = outputs
+    PROJECT_STORE[project_id]["updated_at"] = time.time()
+    return {"ok": True, "project_id": project_id, **outputs}
+
+
+@app.post("/projects/{project_id}/presentation/build")
+def build_presentation(
+    project_id: str,
+    req: PresentationBuildRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    if project_id not in PROJECT_STORE:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    user_id = _account_user_id(request, x_user_id=x_user_id, authorization=authorization)
+    acct = _consume_credits(user_id, AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", agent_id="PRESENTATION_AGENT", project_id=project_id)
+    deck = _presentation_deck(project_id, req.concept_index or PROJECT_STORE[project_id].get("selected_concept_index") or 0)
+    PROJECT_STORE[project_id]["presentation"] = deck
+    PROJECT_STORE[project_id]["updated_at"] = time.time()
+    return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
 
 
 @app.get("/briefcraft_backend_connector.js")
@@ -1652,6 +2524,19 @@ def account_balance(
         "balance": acct["credit_balance"],
         "unit": "tokens",
         "ledger": CREDIT_LEDGER.get(user_id, [])[-10:],
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+        "low_balance_threshold": LOW_BALANCE_THRESHOLD,
+        "low_balance": int(acct["credit_balance"]) <= LOW_BALANCE_THRESHOLD,
+    }
+
+
+@app.get("/account/rates")
+def account_rates():
+    return {
+        "ok": True,
+        "currency": "INR",
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+        "low_balance_threshold": LOW_BALANCE_THRESHOLD,
     }
 
 
