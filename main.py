@@ -14,6 +14,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+try:
+    from supabase import create_client as create_supabase_client
+except Exception:
+    create_supabase_client = None
+
 
 # =============================================================================
 # BRIEFCRAFTAI - CLEAN CREATIVE STUDIO BACKEND
@@ -166,6 +171,7 @@ PROJECT_JOBS: Dict[str, List[Dict[str, Any]]] = {}
 ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 SESSIONS: Dict[str, Dict[str, Any]] = {}
+_SUPABASE_CLIENT = None
 
 DEFAULT_CREDIT_GRANT = int(os.getenv("DEFAULT_CREDIT_GRANT", "2500"))
 LOW_BALANCE_THRESHOLD = int(os.getenv("LOW_BALANCE_THRESHOLD", "1000"))
@@ -293,6 +299,28 @@ CONCEPT_ARCHETYPES = [
 
 def now_ts() -> float:
     return time.time()
+
+
+def get_supabase():
+    global _SUPABASE_CLIENT
+    if _SUPABASE_CLIENT is not None:
+        return _SUPABASE_CLIENT
+    if not create_supabase_client:
+        return None
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        or os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+        or os.getenv("SUPABASE_KEY", "").strip()
+    )
+    if not url or not key:
+        return None
+    try:
+        _SUPABASE_CLIENT = create_supabase_client(url, key)
+        return _SUPABASE_CLIENT
+    except Exception as exc:
+        print(f"[WARN] Supabase client unavailable: {exc}")
+        return None
 
 
 def dump_model(model: Any) -> Dict[str, Any]:
@@ -752,15 +780,61 @@ def grant_credits(user_id: str, amount: int, reason: str, package_id: Optional[s
     return acct
 
 
-def consume_credits(user_id: str, amount: int, reason: str, agent_id: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def consume_credits(
+    user_id: str,
+    amount: int,
+    reason: str,
+    agent_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
     acct = ensure_account(user_id)
     amount = max(0, int(amount))
+    request_id = request_id or str(uuid.uuid4())
+    sb = get_supabase()
+    if sb:
+        try:
+            rpc_res = sb.rpc("bc_consume_credits", {
+                "p_user_key": user_id,
+                "p_amount": amount,
+                "p_reason": reason,
+                "p_agent_id": agent_id,
+                "p_project_id": project_id,
+                "p_endpoint": endpoint,
+                "p_request_id": request_id,
+            }).execute()
+            data = getattr(rpc_res, "data", None)
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict):
+                balance = data.get("balance") or data.get("credit_balance") or data.get("balance_after")
+                if balance is not None:
+                    acct["credit_balance"] = int(balance)
+                    acct["updated_at"] = now_ts()
+                CREDIT_LEDGER.setdefault(user_id, []).append({
+                    "id": str(uuid.uuid4()),
+                    "type": "debit",
+                    "amount": amount,
+                    "balance_after": acct["credit_balance"],
+                    "reason": reason,
+                    "agent_id": agent_id,
+                    "project_id": project_id,
+                    "endpoint": endpoint,
+                    "request_id": request_id,
+                    "source": "supabase_rpc",
+                    "ts": now_ts(),
+                })
+                return acct
+        except Exception as exc:
+            print(f"[WARN] Supabase bc_consume_credits failed; falling back to local store: {exc}")
+
     balance = int(acct.get("credit_balance", 0))
     if amount > balance:
         raise HTTPException(status_code=402, detail={"message": "Insufficient credits.", "required": amount, "balance": balance, "upgrade_endpoint": "/account/packages"})
     acct["credit_balance"] = balance - amount
     acct["updated_at"] = now_ts()
-    CREDIT_LEDGER.setdefault(user_id, []).append({"id": str(uuid.uuid4()), "type": "debit", "amount": amount, "balance_after": acct["credit_balance"], "reason": reason, "agent_id": agent_id, "project_id": project_id, "ts": now_ts()})
+    CREDIT_LEDGER.setdefault(user_id, []).append({"id": str(uuid.uuid4()), "type": "debit", "amount": amount, "balance_after": acct["credit_balance"], "reason": reason, "agent_id": agent_id, "project_id": project_id, "endpoint": endpoint, "request_id": request_id, "source": "local_store", "ts": now_ts()})
     return acct
 
 
@@ -1056,7 +1130,7 @@ def account_packages():
 
 @app.post("/account/credits/consume")
 def account_consume_credits(req: CreditConsumeRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), req.amount, req.reason or "usage", req.agent_id, req.project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), req.amount, req.reason or "usage", req.agent_id, req.project_id, "/account/credits/consume")
     return {"ok": True, "account": acct, "balance": acct["credit_balance"], "unit": "tokens"}
 
 
@@ -1136,7 +1210,7 @@ def run_project_pipeline(project_id: str, req: ProjectRunRequest, request: Reque
     concepts = generate_concepts(brief, ctx, 3)
     project.update({"brief": brief, "event_type": ctx["event_type"], "brand": ctx["brand"], "venue": ctx["venue"], "style_direction": ctx["style_direction"], "structured_brief": structured, "analysis": structured["executive_summary"], "concepts": concepts, "concept_options": concepts, "status": "concepts_ready", "updated_at": now_ts()})
     PROJECT_JOBS.setdefault(project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "concept", "section": "concepts", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["CONCEPT_AGENT"]["credit_cost"], "Concept generation", "CONCEPT_AGENT", project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["CONCEPT_AGENT"]["credit_cost"], "Concept generation", "CONCEPT_AGENT", project_id, f"/projects/{project_id}/run")
     return {"ok": True, "project_id": project_id, "analysis": structured["executive_summary"], "structured_brief": structured, "concepts": concepts, "concept_options": concepts, "missing_questions": ctx["missing_questions"], "ucd_message": f"{ctx['user_name']}, I understood the brand and brief. Review missing questions, confirm deliverables and choose a concept route.", "account": acct, "hourly_rates_inr": AGENT_HOURLY_RATES_INR}
 
 
@@ -1191,7 +1265,7 @@ def get_api_project_moodboard(project_id: str):
 def generate_moodboard(req: MoodboardGenerateRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     if req.project_id not in PROJECT_STORE:
         raise HTTPException(status_code=404, detail="Project not found.")
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["MOODBOARD_AGENT"]["credit_cost"], "Moodboard generation", "MOODBOARD_AGENT", req.project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["MOODBOARD_AGENT"]["credit_cost"], "Moodboard generation", "MOODBOARD_AGENT", req.project_id, "/api/moodboard/generate")
     assets = build_moodboard_assets(req.project_id, req.concept_index or 0, req.count or 6)
     PROJECT_JOBS.setdefault(req.project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "moodboard", "section": "moodboard", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
     return {"ok": True, "project_id": req.project_id, "assets": assets, "account": acct, "message": "Moodboard generated with mood, materials, lighting, ambience, seating and stage logic."}
@@ -1201,7 +1275,7 @@ def generate_moodboard(req: MoodboardGenerateRequest, request: Request, x_user_i
 def generate_2d(req: AssetGenerateRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     if req.project_id not in PROJECT_STORE:
         raise HTTPException(status_code=404, detail="Project not found.")
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["GRAPHICS_2D_AGENT"]["credit_cost"], "2D graphics generation", "GRAPHICS_2D_AGENT", req.project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["GRAPHICS_2D_AGENT"]["credit_cost"], "2D graphics generation", "GRAPHICS_2D_AGENT", req.project_id, "/ai/generate-2d")
     assets = build_2d_assets(req.project_id, req.concept_index or 0)
     PROJECT_JOBS.setdefault(req.project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "2d_graphics", "section": "2d_graphics", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
     return {"ok": True, "project_id": req.project_id, "assets": assets, "account": acct}
@@ -1211,7 +1285,7 @@ def generate_2d(req: AssetGenerateRequest, request: Request, x_user_id: Optional
 def generate_3d(project_id: str, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     if project_id not in PROJECT_STORE:
         raise HTTPException(status_code=404, detail="Project not found.")
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", "RENDER_3D_AGENT", project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", "RENDER_3D_AGENT", project_id, f"/projects/{project_id}/renders/generate-separated")
     idx = PROJECT_STORE[project_id].get("selected_concept_index") or 0
     assets = build_3d_assets(project_id, idx)
     PROJECT_JOBS.setdefault(project_id, []).append({"id": str(uuid.uuid4()), "job_kind": "3d_renders", "section": "renders", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()})
@@ -1236,7 +1310,7 @@ def build_departments(project_id: str):
 def build_presentation(project_id: str, req: PresentationBuildRequest, request: Request, x_user_id: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     if project_id not in PROJECT_STORE:
         raise HTTPException(status_code=404, detail="Project not found.")
-    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id)
+    acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id, f"/projects/{project_id}/presentation/build")
     deck = presentation_deck(project_id, req.concept_index or PROJECT_STORE[project_id].get("selected_concept_index") or 0)
     PROJECT_STORE[project_id]["presentation"] = deck
     PROJECT_STORE[project_id]["updated_at"] = now_ts()
@@ -1253,7 +1327,7 @@ def run_agent(req: AgentRunRequest, request: Request, x_user_id: Optional[str] =
         raise HTTPException(status_code=404, detail="Agent not found or disabled.")
     cost = int(agent.get("credit_cost") or 0)
     if cost:
-        consume_credits(user_id, cost, f"Agent run: {agent['name']}", agent_id, req.project_id)
+        consume_credits(user_id, cost, f"Agent run: {agent['name']}", agent_id, req.project_id, "/agents/run")
     if agent_id == "ACCOUNT_AGENT":
         data = account_payload(user_id)
         payload = {"message": f"Your balance is {data['balance']} tokens.", **data}
