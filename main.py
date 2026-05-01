@@ -180,6 +180,33 @@ class JobCreateRequest(BaseModel):
     run_async: bool = True
 
 
+class ApprovalGateRequest(BaseModel):
+    gate: str
+    approved: bool = True
+    note: Optional[str] = None
+    approved_by: Optional[str] = None
+
+
+class ProjectMemoryRequest(BaseModel):
+    user_name: Optional[str] = None
+    brand_tone: Optional[str] = None
+    budget_range: Optional[str] = None
+    preferred_style: Optional[str] = None
+    selected_concept_index: Optional[int] = None
+    approved_deliverables: List[str] = []
+    rejected_ideas: List[str] = []
+    notes: List[str] = []
+    feedback: Optional[str] = None
+
+
+class HandoffRequest(BaseModel):
+    from_agent: str
+    to_agent: str
+    project_id: str
+    reason: Optional[str] = None
+    payload: Dict[str, Any] = {}
+
+
 # =============================================================================
 # IN-MEMORY STORES
 # =============================================================================
@@ -193,6 +220,39 @@ ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 _SUPABASE_CLIENT = None
+
+APPROVAL_GATES = [
+    "brief_approved",
+    "deliverables_confirmed",
+    "concept_approved",
+    "moodboard_approved",
+    "cad_approved",
+    "graphics_approved",
+    "renders_approved",
+    "presentation_approved",
+]
+
+JOB_KIND_AGENT = {
+    "research": "RESEARCH_AGENT",
+    "concept": "CONCEPT_AGENT",
+    "moodboard": "MOODBOARD_AGENT",
+    "2d_graphics": "GRAPHICS_2D_AGENT",
+    "3d_renders": "RENDER_3D_AGENT",
+    "departments": "SHOW_RUNNER_AGENT",
+    "presentation": "PRESENTATION_AGENT",
+    "cad_layout": "CAD_AGENT",
+}
+
+JOB_GATE_REQUIREMENTS = {
+    "concept": [],
+    "research": [],
+    "moodboard": ["brief_approved", "concept_approved"],
+    "2d_graphics": ["brief_approved", "concept_approved", "moodboard_approved"],
+    "3d_renders": ["brief_approved", "concept_approved"],
+    "departments": ["brief_approved", "concept_approved"],
+    "presentation": ["brief_approved", "concept_approved"],
+    "cad_layout": [],
+}
 
 DEFAULT_CREDIT_GRANT = int(os.getenv("DEFAULT_CREDIT_GRANT", "2500"))
 LOW_BALANCE_THRESHOLD = int(os.getenv("LOW_BALANCE_THRESHOLD", "1000"))
@@ -439,16 +499,193 @@ def persist_research(item: Dict[str, Any]) -> None:
     })
 
 
+def persist_handoff(item: Dict[str, Any], project_id: Optional[str] = None) -> None:
+    sb_table_upsert("bc_handoffs", {
+        "id": item.get("id"),
+        "project_id": project_id or item.get("project_id"),
+        "from_agent": item.get("from_agent"),
+        "to_agent": item.get("to_agent"),
+        "reason": item.get("reason"),
+        "status": item.get("status", "ready"),
+        "data": item,
+        "created_at": item.get("created_at") or now_ts(),
+    })
+
+
+def persist_file_intelligence(item: Dict[str, Any], project_id: Optional[str] = None) -> None:
+    sb_table_upsert("bc_file_intelligence", {
+        "id": item.get("id"),
+        "project_id": project_id,
+        "filename": item.get("filename"),
+        "file_kind": item.get("file_kind"),
+        "content_type": item.get("content_type"),
+        "data": item,
+        "created_at": item.get("created_at") or now_ts(),
+    })
+
+
 def load_project(project_id: str) -> Optional[Dict[str, Any]]:
     project = PROJECT_STORE.get(project_id)
     if project:
+        ensure_project_runtime(project)
         return project
     row = sb_table_select_one("bc_projects", "project_id", project_id) or sb_table_select_one("bc_projects", "id", project_id)
     if row:
         data = row.get("data") if isinstance(row.get("data"), dict) else row
+        ensure_project_runtime(data)
         PROJECT_STORE[project_id] = data
         return data
     return None
+
+
+def default_project_memory(project: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    project = project or {}
+    return {
+        "user_name": project.get("user_name") or "there",
+        "brand_tone": project.get("style_direction") or "premium creative",
+        "budget_range": project.get("budget_range") or "not confirmed",
+        "preferred_style": project.get("style_direction") or "premium creative",
+        "selected_concept_index": project.get("selected_concept_index"),
+        "approved_deliverables": project.get("deliverables") or [],
+        "rejected_ideas": [],
+        "notes": [],
+        "feedback_history": [],
+        "last_updated": now_ts(),
+    }
+
+
+def ensure_project_runtime(project: Dict[str, Any]) -> Dict[str, Any]:
+    project.setdefault("memory", default_project_memory(project))
+    approvals = project.setdefault("approval_gates", {})
+    for gate in APPROVAL_GATES:
+        approvals.setdefault(gate, {"approved": False, "note": None, "updated_at": None, "approved_by": None})
+    project.setdefault("handoffs", [])
+    project.setdefault("file_intelligence", [])
+    project.setdefault("workflow_state", {
+        "current_stage": project.get("status") or "draft",
+        "next_recommended_agent": "UCD_AGENT",
+        "blocked_by": [],
+    })
+    return project
+
+
+def merge_project_memory(project: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_project_runtime(project)
+    memory = project["memory"]
+    for key in ["user_name", "brand_tone", "budget_range", "preferred_style"]:
+        if update.get(key):
+            memory[key] = update[key]
+    if update.get("selected_concept_index") is not None:
+        memory["selected_concept_index"] = update["selected_concept_index"]
+        project["selected_concept_index"] = update["selected_concept_index"]
+    for key in ["approved_deliverables", "rejected_ideas", "notes"]:
+        values = update.get(key) or []
+        if values:
+            existing = memory.setdefault(key, [])
+            for value in values:
+                if value not in existing:
+                    existing.append(value)
+    if update.get("feedback"):
+        memory.setdefault("feedback_history", []).append({"text": update["feedback"], "ts": now_ts()})
+    memory["last_updated"] = now_ts()
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return memory
+
+
+def set_project_gate(project: Dict[str, Any], gate: str, approved: bool, note: Optional[str] = None, approved_by: Optional[str] = None) -> Dict[str, Any]:
+    ensure_project_runtime(project)
+    if gate not in APPROVAL_GATES:
+        raise HTTPException(status_code=400, detail=f"Unknown approval gate: {gate}")
+    project["approval_gates"][gate] = {
+        "approved": bool(approved),
+        "note": note,
+        "approved_by": approved_by,
+        "updated_at": now_ts(),
+    }
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return project["approval_gates"][gate]
+
+
+def unmet_gates(project: Dict[str, Any], job_kind: str) -> List[str]:
+    ensure_project_runtime(project)
+    required = JOB_GATE_REQUIREMENTS.get(job_kind, [])
+    gates = project.get("approval_gates") or {}
+    return [gate for gate in required if not (gates.get(gate) or {}).get("approved")]
+
+
+def infer_file_intelligence(file_meta: Optional[UCDFileMeta]) -> Optional[Dict[str, Any]]:
+    if not file_meta:
+        return None
+    filename = (file_meta.filename or "").lower()
+    content_type = (file_meta.content_type or "").lower()
+    ext = Path(filename).suffix.lower()
+    if ext in {".dwg", ".dxf"} or "cad" in content_type:
+        file_kind = "cad_reference"
+        recommended_agents = ["CAD_AGENT", "RENDER_3D_AGENT"]
+        extraction = ["scale", "layers", "dimensions", "venue boundary", "production drawing clues"]
+    elif ext == ".pdf" or "pdf" in content_type:
+        file_kind = "pdf_reference"
+        recommended_agents = ["UCD_AGENT", "CAD_AGENT", "GRAPHICS_2D_AGENT"]
+        extraction = ["brief text", "brand rules", "floor plan", "deliverables", "dimensions"]
+    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"} or content_type.startswith("image/"):
+        file_kind = "image_reference"
+        recommended_agents = ["MOODBOARD_AGENT", "RENDER_3D_AGENT", "GRAPHICS_2D_AGENT", "CAD_AGENT"]
+        extraction = ["venue look", "brand mood", "materials", "lighting", "stage/photo-zone geometry"]
+    else:
+        file_kind = "general_reference"
+        recommended_agents = ["UCD_AGENT"]
+        extraction = ["brief signals", "brand cues", "production requirements"]
+    return {
+        "id": str(uuid.uuid4()),
+        "filename": file_meta.filename,
+        "content_type": file_meta.content_type,
+        "url": file_meta.url,
+        "size_bytes": file_meta.size_bytes,
+        "file_kind": file_kind,
+        "recommended_agents": recommended_agents,
+        "extraction_targets": extraction,
+        "created_at": now_ts(),
+    }
+
+
+def add_handoff(project: Dict[str, Any], from_agent: str, to_agent: str, reason: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ensure_project_runtime(project)
+    handoff = {
+        "id": str(uuid.uuid4()),
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "reason": reason,
+        "payload": payload or {},
+        "status": "ready",
+        "created_at": now_ts(),
+    }
+    project["handoffs"].append(handoff)
+    project["updated_at"] = now_ts()
+    persist_handoff(handoff, project.get("project_id") or project.get("id"))
+    persist_project(project)
+    return handoff
+
+
+def workflow_recommendation(project: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_project_runtime(project)
+    approvals = project.get("approval_gates") or {}
+    if not (approvals.get("brief_approved") or {}).get("approved"):
+        stage, agent, blocked = "brief_review", "UCD_AGENT", ["brief_approved"]
+    elif not (approvals.get("concept_approved") or {}).get("approved"):
+        stage, agent, blocked = "concept_selection", "CONCEPT_AGENT", ["concept_approved"]
+    elif not (approvals.get("moodboard_approved") or {}).get("approved"):
+        stage, agent, blocked = "moodboard_review", "MOODBOARD_AGENT", ["moodboard_approved"]
+    elif not (approvals.get("cad_approved") or {}).get("approved"):
+        stage, agent, blocked = "production_layout", "CAD_AGENT", ["cad_approved"]
+    elif not (approvals.get("presentation_approved") or {}).get("approved"):
+        stage, agent, blocked = "client_pitch", "PRESENTATION_AGENT", ["presentation_approved"]
+    else:
+        stage, agent, blocked = "ready_for_delivery", "SHOW_RUNNER_AGENT", []
+    rec = {"current_stage": stage, "next_recommended_agent": agent, "blocked_by": blocked}
+    project["workflow_state"] = rec
+    return rec
 
 
 def dump_model(model: Any) -> Dict[str, Any]:
@@ -1177,6 +1414,19 @@ def ucd_response(req: UCDChatRequest) -> UCDChatResponse:
     intent = detect_ucd_intent(req.message, req.file)
     questions = ucd_missing_for_cad(intent, req.message, req.file) if intent.startswith("cad_") else missing_brief_questions(req.message or "")
     has_file = req.file is not None
+    project = load_project(req.project_id or "") if req.project_id else None
+    file_intel = infer_file_intelligence(req.file)
+    if project:
+        ensure_project_runtime(project)
+        if file_intel:
+            project.setdefault("file_intelligence", []).append(file_intel)
+            persist_file_intelligence(file_intel, project.get("project_id") or project.get("id"))
+        merge_project_memory(project, {
+            "feedback": req.message,
+            "notes": [f"UCD detected intent: {intent}"],
+        })
+        workflow_recommendation(project)
+        persist_project(project)
     ui: Dict[str, Any] = {}
     agent: Dict[str, Any] = {}
     next_actions: List[Dict[str, Any]] = []
@@ -1189,6 +1439,7 @@ def ucd_response(req: UCDChatRequest) -> UCDChatResponse:
             "project_id": req.project_id or "demo-project",
             "title": req.title or "CAD Layout",
             "file": dump_model(req.file) if req.file else None,
+            "file_intelligence": file_intel,
             "preferred_endpoint": "/api/cad/pro/trace" if intent == "cad_trace_file" else "/api/cad/pro/generate",
             "instruction": "Open CAD fullscreen. Ask only missing CAD details. Generate layout, dimensions, production views, SVG/PDF/DXF.",
         }
@@ -1212,6 +1463,9 @@ def ucd_response(req: UCDChatRequest) -> UCDChatResponse:
             "supervised_by": "UCD_AGENT",
             "preferred_endpoint": route[1],
             "instruction": "Understand brand, category, venue, brief, technology opportunities and production needs before output.",
+            "project_memory": project.get("memory") if project else None,
+            "workflow_state": project.get("workflow_state") if project else None,
+            "file_intelligence": file_intel,
         }
         if questions and intent in {"concept_strategy", "brief_orchestration", "conversation"}:
             next_actions.append({"type": "ask_user", "questions": questions})
@@ -1226,7 +1480,7 @@ def ucd_response(req: UCDChatRequest) -> UCDChatResponse:
         agent=agent,
         next_actions=next_actions,
     )
-    SESSIONS[sid]["history"].append({"user": req.message, "intent": intent, "questions": questions, "ts": now_ts()})
+    SESSIONS[sid]["history"].append({"user": req.message, "intent": intent, "questions": questions, "file_intelligence": file_intel, "ts": now_ts()})
     return response
 
 
@@ -1243,17 +1497,27 @@ def layout_job_response(message: str, project_id: str = "demo-project") -> Dict[
 
 
 def create_job(project_id: str, job_kind: str, agent_id: Optional[str] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    project = load_project(project_id)
+    blocked = unmet_gates(project, job_kind) if project else []
+    status = "waiting_for_user" if blocked else "queued"
     job = {
         "id": str(uuid.uuid4()),
         "project_id": project_id,
         "job_kind": job_kind,
-        "agent_id": agent_id,
+        "agent_id": agent_id or JOB_KIND_AGENT.get(job_kind),
         "section": job_kind,
-        "status": "queued",
+        "status": status,
         "progress": 0,
         "payload": payload or {},
         "result": None,
         "error": None,
+        "blocked_by": blocked,
+        "steps": [{
+            "ts": now_ts(),
+            "status": status,
+            "progress": 0,
+            "message": "Job is waiting for approval gates." if blocked else "Job queued.",
+        }],
         "created_at": now_ts(),
         "updated_at": now_ts(),
     }
@@ -1263,7 +1527,7 @@ def create_job(project_id: str, job_kind: str, agent_id: Optional[str] = None, p
     return job
 
 
-def update_job(job_id: str, status: Optional[str] = None, progress: Optional[int] = None, result: Any = None, error: Optional[str] = None) -> Dict[str, Any]:
+def update_job(job_id: str, status: Optional[str] = None, progress: Optional[int] = None, result: Any = None, error: Optional[str] = None, message: Optional[str] = None) -> Dict[str, Any]:
     job = JOB_STORE.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -1275,6 +1539,13 @@ def update_job(job_id: str, status: Optional[str] = None, progress: Optional[int
         job["result"] = result
     if error is not None:
         job["error"] = error
+    if message:
+        job.setdefault("steps", []).append({
+            "ts": now_ts(),
+            "status": job.get("status"),
+            "progress": job.get("progress", 0),
+            "message": message,
+        })
     job["updated_at"] = now_ts()
     persist_job(job)
     return job
@@ -1285,33 +1556,49 @@ def execute_job(job_id: str) -> None:
     if not job:
         return
     try:
-        update_job(job_id, "running", 10)
         project_id = job["project_id"]
         kind = job["job_kind"]
         payload = job.get("payload") or {}
+        project = load_project(project_id) or {}
+        blocked = unmet_gates(project, kind) if project else []
+        if blocked:
+            job["blocked_by"] = blocked
+            update_job(job_id, "waiting_for_user", 0, message="Waiting for approvals: " + ", ".join(blocked))
+            return
+        job["blocked_by"] = []
+        update_job(job_id, "running", 10, message=f"{job.get('agent_id') or JOB_KIND_AGENT.get(kind, 'AGENT')} started.")
         result: Any
         if kind == "research":
-            project = load_project(project_id) or {}
+            update_job(job_id, "running", 25, message="Researching brand, category, technology and venue references.")
             ctx = brief_context(payload.get("brief") or project.get("brief") or "", None)
             ctx["brand"] = payload.get("brand") or project.get("brand") or ctx.get("brand")
             ctx["venue"] = payload.get("venue") or project.get("venue") or ctx.get("venue")
             result = run_research_pack(ctx, payload.get("max_results", 5), project_id)
         elif kind == "moodboard":
+            update_job(job_id, "running", 35, message="Creating mood, material, lighting, ambience and stage direction frames.")
             result = {"assets": build_moodboard_assets(project_id, payload.get("concept_index", 0), payload.get("count", 6))}
+            add_handoff(project, "MOODBOARD_AGENT", "GRAPHICS_2D_AGENT", "Moodboard style system ready for 2D art direction.", {"asset_count": len(result["assets"])})
         elif kind == "2d_graphics":
+            update_job(job_id, "running", 40, message="Producing invite, badge, backdrop, facade and copy-led design outputs.")
             result = {"assets": build_2d_assets(project_id, payload.get("concept_index", 0))}
+            add_handoff(project, "GRAPHICS_2D_AGENT", "RENDER_3D_AGENT", "2D outputs can be rendered as realistic 3D objects.", {"asset_count": len(result["assets"])})
+            add_handoff(project, "GRAPHICS_2D_AGENT", "CAD_AGENT", "Physical graphics need fabrication dimensions and placement drawings.", {})
         elif kind == "3d_renders":
+            update_job(job_id, "running", 42, message="Building 3D scenes from selected concept and available CAD/venue intelligence.")
             result = {"assets": build_3d_assets(project_id, payload.get("concept_index", 0))}
+            add_handoff(project, "RENDER_3D_AGENT", "CAD_AGENT", "3D approved structures need top/right/left/front production drawings.", {"asset_count": len(result["assets"])})
         elif kind == "departments":
+            update_job(job_id, "running", 45, message="Building cross-department AV, sound, lighting, show runner and PDF output.")
             result = department_outputs(project_id, payload.get("concept_index", 0))
             result["pdf_assets"] = build_pdf_assets(project_id, payload.get("concept_index", 0))
         elif kind == "presentation":
+            update_job(job_id, "running", 48, message="Assembling client pitch narrative, concept story and creative output summary.")
             result = {"presentation": presentation_deck(project_id, payload.get("concept_index", 0))}
         else:
             result = {"message": f"Job kind {kind} accepted but no worker is configured yet."}
-        update_job(job_id, "completed", 100, result=result)
+        update_job(job_id, "completed", 100, result=result, message="Job completed.")
     except Exception as exc:
-        update_job(job_id, "failed", 100, error=str(exc))
+        update_job(job_id, "failed", 100, error=str(exc), message=f"Job failed: {exc}")
 
 
 # =============================================================================
@@ -1357,6 +1644,11 @@ def studio_frontend_contract():
             "supabase_persistence": bool(get_supabase()),
             "job_queue": True,
             "research_agent": True,
+            "ucd_memory": True,
+            "approval_gates": True,
+            "file_intelligence": True,
+            "agent_handoffs": True,
+            "admin_status": True,
         },
         "endpoints": {
             "agents": "/agents",
@@ -1366,6 +1658,10 @@ def studio_frontend_contract():
             "project_create": "/projects",
             "jobs_create": "/jobs",
             "jobs_get": "/jobs/{job_id}",
+            "project_memory": "/projects/{project_id}/memory",
+            "approval_gates": "/projects/{project_id}/approval-gates",
+            "workflow": "/projects/{project_id}/workflow",
+            "handoffs": "/projects/{project_id}/handoffs",
             "research_run": "/research/run",
             "project_research": "/projects/{project_id}/research",
             "project_run": "/projects/{project_id}/run",
@@ -1379,6 +1675,8 @@ def studio_frontend_contract():
             "presentation": "/projects/{project_id}/presentation/build",
             "cad": "/api/cad/pro/generate",
             "ucd_chat": "/ucd/chat",
+            "admin_status": "/admin/status",
+            "admin_metrics": "/admin/metrics",
         },
         "ucd_rules": [
             "If user asks for a single job, route directly to that specialist instead of forcing full workflow.",
@@ -1497,6 +1795,42 @@ create table if not exists public.bc_credit_accounts (
   updated_at timestamptz default now()
 );
 
+create table if not exists public.bc_handoffs (
+  id text primary key,
+  project_id text,
+  from_agent text,
+  to_agent text,
+  reason text,
+  status text default 'ready',
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_file_intelligence (
+  id text primary key,
+  project_id text,
+  filename text,
+  file_kind text,
+  content_type text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create index if not exists bc_assets_project_idx on public.bc_assets(project_id);
+create index if not exists bc_jobs_project_idx on public.bc_jobs(project_id);
+create index if not exists bc_research_project_idx on public.bc_research(project_id);
+create index if not exists bc_handoffs_project_idx on public.bc_handoffs(project_id);
+create index if not exists bc_file_intelligence_project_idx on public.bc_file_intelligence(project_id);
+
+alter table public.bc_projects enable row level security;
+alter table public.bc_assets enable row level security;
+alter table public.bc_jobs enable row level security;
+alter table public.bc_research enable row level security;
+alter table public.bc_credit_ledger enable row level security;
+alter table public.bc_credit_accounts enable row level security;
+alter table public.bc_handoffs enable row level security;
+alter table public.bc_file_intelligence enable row level security;
+
 create or replace function public.bc_consume_credits(
   p_user_key text,
   p_amount int,
@@ -1591,6 +1925,7 @@ def create_project(req: ProjectCreateRequest):
         "created_at": now,
         "updated_at": now,
     }
+    ensure_project_runtime(project)
     PROJECT_STORE[project_id] = project
     PROJECT_ASSETS.setdefault(project_id, [])
     PROJECT_JOBS.setdefault(project_id, [])
@@ -1608,7 +1943,72 @@ def get_project(project_id: str):
     project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    workflow_recommendation(project)
     return {"ok": True, "project": project, "assets": PROJECT_ASSETS.get(project_id, []), "jobs": PROJECT_JOBS.get(project_id, [])}
+
+
+@app.get("/projects/{project_id}/memory")
+def get_project_memory(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "memory": project["memory"], "workflow_state": workflow_recommendation(project)}
+
+
+@app.post("/projects/{project_id}/memory")
+def update_project_memory(project_id: str, req: ProjectMemoryRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    memory = merge_project_memory(project, dump_model(req))
+    return {"ok": True, "project_id": project_id, "memory": memory, "workflow_state": workflow_recommendation(project)}
+
+
+@app.get("/projects/{project_id}/approval-gates")
+def get_project_approval_gates(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "approval_gates": project["approval_gates"], "workflow_state": workflow_recommendation(project)}
+
+
+@app.post("/projects/{project_id}/approval-gates")
+def update_project_approval_gate(project_id: str, req: ApprovalGateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    gate = set_project_gate(project, req.gate, req.approved, req.note, req.approved_by)
+    rec = workflow_recommendation(project)
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "gate": req.gate, "approval": gate, "workflow_state": rec}
+
+
+@app.get("/projects/{project_id}/workflow")
+def get_project_workflow(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "workflow_state": workflow_recommendation(project),
+        "approval_gates": project.get("approval_gates"),
+        "handoffs": project.get("handoffs", []),
+        "file_intelligence": project.get("file_intelligence", []),
+    }
+
+
+@app.post("/projects/{project_id}/handoffs")
+def create_project_handoff(project_id: str, req: HandoffRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    if req.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Project id mismatch.")
+    handoff = add_handoff(project, req.from_agent, req.to_agent, req.reason or "Agent handoff", req.payload)
+    return {"ok": True, "project_id": project_id, "handoff": handoff, "handoffs": project.get("handoffs", [])}
 
 
 @app.post("/projects/{project_id}/run")
@@ -1625,12 +2025,25 @@ def run_project_pipeline(project_id: str, req: ProjectRunRequest, request: Reque
     structured["live_research"] = research
     concepts = generate_concepts(brief, ctx, 3)
     project.update({"brief": brief, "event_type": ctx["event_type"], "brand": ctx["brand"], "venue": ctx["venue"], "style_direction": ctx["style_direction"], "structured_brief": structured, "analysis": structured["executive_summary"], "concepts": concepts, "concept_options": concepts, "status": "concepts_ready", "updated_at": now_ts()})
+    ensure_project_runtime(project)
+    merge_project_memory(project, {
+        "user_name": ctx.get("user_name"),
+        "brand_tone": ctx.get("style_direction"),
+        "budget_range": ctx.get("budget_range"),
+        "preferred_style": ctx.get("style_direction"),
+        "approved_deliverables": ctx.get("deliverables") or [],
+        "notes": [
+            "UCD created structured brief and research-backed concept routes.",
+            "Concept Agent generated multiple distinct routes from the current brief.",
+        ],
+    })
+    workflow_recommendation(project)
     persist_project(project)
     job = {"id": str(uuid.uuid4()), "project_id": project_id, "job_kind": "concept", "agent_id": "CONCEPT_AGENT", "section": "concepts", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
     PROJECT_JOBS.setdefault(project_id, []).append(job)
     persist_job(job)
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["CONCEPT_AGENT"]["credit_cost"], "Concept generation", "CONCEPT_AGENT", project_id, f"/projects/{project_id}/run")
-    return {"ok": True, "project_id": project_id, "analysis": structured["executive_summary"], "structured_brief": structured, "research": research, "concepts": concepts, "concept_options": concepts, "missing_questions": ctx["missing_questions"], "ucd_message": f"{ctx['user_name']}, I understood the brand and brief. Review missing questions, confirm deliverables and choose a concept route.", "account": acct, "hourly_rates_inr": AGENT_HOURLY_RATES_INR}
+    return {"ok": True, "project_id": project_id, "analysis": structured["executive_summary"], "structured_brief": structured, "research": research, "concepts": concepts, "concept_options": concepts, "missing_questions": ctx["missing_questions"], "memory": project.get("memory"), "approval_gates": project.get("approval_gates"), "workflow_state": project.get("workflow_state"), "ucd_message": f"{ctx['user_name']}, I understood the brand and brief. Review missing questions, confirm deliverables and choose a concept route.", "account": acct, "hourly_rates_inr": AGENT_HOURLY_RATES_INR}
 
 
 @app.get("/projects/{project_id}/concepts")
@@ -1673,6 +2086,8 @@ def create_background_job(req: JobCreateRequest, background_tasks: BackgroundTas
     if not load_project(req.project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     job = create_job(req.project_id, req.job_kind, req.agent_id, req.payload)
+    if job.get("status") == "waiting_for_user":
+        return {"ok": True, "job": job, "message": "Job created but waiting for required approval gates.", "blocked_by": job.get("blocked_by", [])}
     if req.run_async:
         background_tasks.add_task(execute_job, job["id"])
     else:
@@ -1792,6 +2207,55 @@ def build_presentation(project_id: str, req: PresentationBuildRequest, request: 
     PROJECT_STORE[project_id]["updated_at"] = now_ts()
     persist_project(PROJECT_STORE[project_id])
     return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
+
+
+@app.get("/admin/status")
+def admin_status():
+    return {
+        "ok": True,
+        "service": APP_NAME,
+        "api_version": API_VERSION,
+        "supabase_configured": bool(get_supabase()),
+        "research_providers": {
+            "tavily": bool(os.getenv("TAVILY_API_KEY", "").strip()),
+            "serper": bool(os.getenv("SERPER_API_KEY", "").strip()),
+        },
+        "counts": {
+            "projects": len(PROJECT_STORE),
+            "assets": sum(len(v) for v in PROJECT_ASSETS.values()),
+            "jobs": len(JOB_STORE),
+            "research_packs": sum(len(v) for v in RESEARCH_STORE.values()),
+            "accounts": len(ACCOUNT_STORE),
+        },
+        "features": {
+            "ucd_memory": True,
+            "approval_gates": True,
+            "file_intelligence": True,
+            "agent_handoffs": True,
+            "job_steps": True,
+            "supabase_persistence": bool(get_supabase()),
+        },
+    }
+
+
+@app.get("/admin/metrics")
+def admin_metrics():
+    job_status_counts: Dict[str, int] = {}
+    agent_usage: Dict[str, int] = {}
+    for job in JOB_STORE.values():
+        job_status_counts[job.get("status", "unknown")] = job_status_counts.get(job.get("status", "unknown"), 0) + 1
+        agent = job.get("agent_id") or "UNKNOWN"
+        agent_usage[agent] = agent_usage.get(agent, 0) + 1
+    credit_used = sum(abs(int(entry.get("amount") or 0)) for ledger in CREDIT_LEDGER.values() for entry in ledger if int(entry.get("amount") or 0) < 0)
+    low_accounts = [user for user, acct in ACCOUNT_STORE.items() if int(acct.get("credit_balance") or 0) <= LOW_BALANCE_THRESHOLD]
+    return {
+        "ok": True,
+        "job_status_counts": job_status_counts,
+        "agent_usage": agent_usage,
+        "credit_used": credit_used,
+        "low_balance_accounts": len(low_accounts),
+        "hourly_rates_inr": AGENT_HOURLY_RATES_INR,
+    }
 
 
 # Agent and UCD endpoints
