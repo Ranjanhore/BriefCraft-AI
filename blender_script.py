@@ -6,35 +6,27 @@ import sys
 from mathutils import Vector
 
 """
-BriefCraft AI — Hybrid 3D Stage + Sketch Environment Blender Worker
+BriefCraft AI — Realistic Hybrid Stage Renderer v3
+
+Goal:
+- Realistic premium stage / LED / truss / lights / seating
+- Sketchy 3D venue environment around it
+- Separate render outputs:
+  realistic_view.png
+  sketch_concept.png
+  merged_hybrid.png
+  stage_closeup.png
+  top_plan.png
+  stage_sketch_environment.glb
 
 CLI:
   blender -b -P blender_script.py -- /path/to/scene.json
-
-Expected JSON:
-{
-  "scene": {
-    "stage": {"width": 60, "depth": 24, "height": 4},
-    "led_wall": {"width": 40, "height": 12},
-    "audience": {"rows": 6, "cols": 10},
-    "colors": {"primary": "#D7A94B", "secondary": "#FFD487"},
-    "lighting": {"style": "premium"},
-    "camera_target": [0, 0, 6]
-  },
-  "render": {
-    "output_dir": "/tmp/render",
-    "width": 1920,
-    "height": 1080,
-    "samples": 96,
-    "engine": "CYCLES"
-  }
-}
 """
 
 
-# --------------------------
-# Basic utilities
-# --------------------------
+# -----------------------------
+# Input / scene reset
+# -----------------------------
 
 def get_json_path() -> str:
     argv = sys.argv
@@ -51,38 +43,25 @@ def load_payload(path: str) -> dict:
         return json.load(f)
 
 
-def hex_to_rgba(hex_color: str, alpha: float = 1.0):
-    hex_color = (hex_color or "#FFFFFF").lstrip("#")
-    if len(hex_color) != 6:
-        return (1.0, 1.0, 1.0, alpha)
-    return (
-        int(hex_color[0:2], 16) / 255.0,
-        int(hex_color[2:4], 16) / 255.0,
-        int(hex_color[4:6], 16) / 255.0,
-        alpha,
-    )
-
-
 def clear_scene() -> None:
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
 
-    for collection in list(bpy.data.collections):
-        if collection.name not in ("Collection",):
-            bpy.data.collections.remove(collection)
-
-    for datablock_group in (
+    for datablocks in (
         bpy.data.meshes,
         bpy.data.materials,
         bpy.data.images,
-        bpy.data.textures,
         bpy.data.curves,
         bpy.data.lights,
         bpy.data.cameras,
     ):
-        for block in list(datablock_group):
+        for block in list(datablocks):
             if block.users == 0:
-                datablock_group.remove(block)
+                datablocks.remove(block)
+
+    for col in list(bpy.data.collections):
+        if col.name != "Collection":
+            bpy.data.collections.remove(col)
 
 
 def ensure_collection(name: str):
@@ -93,89 +72,170 @@ def ensure_collection(name: str):
     return col
 
 
-def link_to_collection(obj, col):
-    try:
-        for c in obj.users_collection:
-            c.objects.unlink(obj)
-    except Exception:
-        pass
+def move_to_collection(obj, col):
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
     col.objects.link(obj)
+
+
+def hex_to_rgba(hex_color: str, alpha: float = 1.0):
+    h = (hex_color or "#D7A94B").replace("#", "")
+    if len(h) != 6:
+        return (1, 1, 1, alpha)
+    return (
+        int(h[0:2], 16) / 255,
+        int(h[2:4], 16) / 255,
+        int(h[4:6], 16) / 255,
+        alpha,
+    )
 
 
 def apply_material(obj, mat):
     if hasattr(obj.data, "materials"):
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
 
 
-def set_node_input(node, name, value):
-    if name in node.inputs:
-        node.inputs[name].default_value = value
+def shade_smooth(obj):
+    try:
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        bpy.ops.object.shade_smooth()
+        obj.select_set(False)
+    except Exception:
+        pass
 
 
-def make_principled_material(name: str, base=(0.1, 0.1, 0.1, 1.0), roughness=0.35, metallic=0.0, alpha=1.0):
-    mat = bpy.data.materials.new(name=name)
+def add_bevel(obj, amount=0.04, segments=2):
+    try:
+        mod = obj.modifiers.new("soft_beveled_edges", "BEVEL")
+        mod.width = amount
+        mod.segments = segments
+        mod.affect = "EDGES"
+        obj.modifiers.new("weighted_normals", "WEIGHTED_NORMAL")
+    except Exception:
+        pass
+
+
+# -----------------------------
+# Materials
+# -----------------------------
+
+def node_mat(name, base=(1,1,1,1), metallic=0.0, roughness=0.35, alpha=1.0, emission=None, strength=0):
+    mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.blend_method = "BLEND" if alpha < 1 else "OPAQUE"
-    mat.use_screen_refraction = alpha < 1 if hasattr(mat, "use_screen_refraction") else False
+    mat.use_screen_refraction = False
     nodes = mat.node_tree.nodes
     bsdf = nodes.get("Principled BSDF")
     if bsdf:
-        set_node_input(bsdf, "Base Color", base)
-        set_node_input(bsdf, "Roughness", roughness)
-        set_node_input(bsdf, "Metallic", metallic)
-        set_node_input(bsdf, "Alpha", alpha)
+        def setv(inp, val):
+            if inp in bsdf.inputs:
+                bsdf.inputs[inp].default_value = val
+        setv("Base Color", base)
+        setv("Metallic", metallic)
+        setv("Roughness", roughness)
+        setv("Alpha", alpha)
+        if emission:
+            if "Emission Color" in bsdf.inputs:
+                bsdf.inputs["Emission Color"].default_value = emission
+            elif "Emission" in bsdf.inputs:
+                bsdf.inputs["Emission"].default_value = emission
+            if "Emission Strength" in bsdf.inputs:
+                bsdf.inputs["Emission Strength"].default_value = strength
     return mat
 
 
-def make_emission_material(name: str, color=(1, 1, 1, 1), strength=2.0, alpha=1.0):
-    mat = bpy.data.materials.new(name=name)
+def emission_mat(name, color=(1,1,1,1), strength=2.0, alpha=1.0):
+    mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.blend_method = "BLEND" if alpha < 1 else "OPAQUE"
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     nodes.clear()
-    out = nodes.new(type="ShaderNodeOutputMaterial")
+    out = nodes.new("ShaderNodeOutputMaterial")
     if alpha < 1:
-        transparent = nodes.new(type="ShaderNodeBsdfTransparent")
-        emission = nodes.new(type="ShaderNodeEmission")
-        mix = nodes.new(type="ShaderNodeMixShader")
-        emission.inputs["Color"].default_value = color
-        emission.inputs["Strength"].default_value = strength
-        mix.inputs[0].default_value = 1.0 - alpha
-        links.new(transparent.outputs["BSDF"], mix.inputs[1])
-        links.new(emission.outputs["Emission"], mix.inputs[2])
+        tr = nodes.new("ShaderNodeBsdfTransparent")
+        em = nodes.new("ShaderNodeEmission")
+        mix = nodes.new("ShaderNodeMixShader")
+        em.inputs["Color"].default_value = color
+        em.inputs["Strength"].default_value = strength
+        mix.inputs[0].default_value = 1 - alpha
+        links.new(tr.outputs["BSDF"], mix.inputs[1])
+        links.new(em.outputs["Emission"], mix.inputs[2])
         links.new(mix.outputs["Shader"], out.inputs["Surface"])
     else:
-        emission = nodes.new(type="ShaderNodeEmission")
-        emission.inputs["Color"].default_value = color
-        emission.inputs["Strength"].default_value = strength
-        links.new(emission.outputs["Emission"], out.inputs["Surface"])
+        em = nodes.new("ShaderNodeEmission")
+        em.inputs["Color"].default_value = color
+        em.inputs["Strength"].default_value = strength
+        links.new(em.outputs["Emission"], out.inputs["Surface"])
     return mat
 
 
-def add_cube(name, location, scale, mat, col):
-    bpy.ops.mesh.primitive_cube_add(location=location)
+def make_materials(colors):
+    primary = hex_to_rgba(colors.get("primary", "#D7A94B"))
+    secondary = hex_to_rgba(colors.get("secondary", "#FFD487"))
+    blue = hex_to_rgba(colors.get("blue", "#4F89FF"))
+
+    mats = {
+        "floor": node_mat("black_polished_reflective_floor", (0.012,0.012,0.014,1), metallic=.35, roughness=.16),
+        "stage": node_mat("black_laminate_stage", (0.025,0.026,0.030,1), metallic=.22, roughness=.28),
+        "stage_side": node_mat("dark_stage_side_panels", (0.018,0.018,0.020,1), metallic=.38, roughness=.32),
+        "gold": node_mat("brushed_champagne_gold", primary, metallic=1.0, roughness=.20, emission=primary, strength=.08),
+        "dark_metal": node_mat("powder_coated_black_metal", (0.006,0.007,0.009,1), metallic=.9, roughness=.25),
+        "screen": node_mat("active_led_screen", (0.03,0.028,0.02,1), metallic=.05, roughness=.18, emission=primary, strength=1.8),
+        "screen_glow": emission_mat("led_screen_glow", primary, 4.2),
+        "accent": emission_mat("gold_accent_emission", secondary, 2.4),
+        "beam": emission_mat("warm_volumetric_beam_proxy", secondary, 0.9, 0.13),
+        "seat_fabric": node_mat("black_velvet_seating", (0.018,0.018,0.022,1), metallic=.05, roughness=.72),
+        "seat_metal": node_mat("gold_seat_legs", primary, metallic=.95, roughness=.23),
+        "speaker": node_mat("speaker_black_mesh", (0.006,0.006,0.007,1), metallic=.15, roughness=.62),
+        "sketch": emission_mat("white_sketch_wire_lines", (0.78,0.84,0.94,1), .8, .50),
+        "sketch_bright": emission_mat("bright_sketch_dimension_lines", (1.0,.86,.52,1), 1.2, .85),
+        "glass": node_mat("soft_transparent_venue_hint", (0.45,0.65,1,.08), metallic=0, roughness=.85, alpha=.08),
+    }
+    return mats
+
+
+# -----------------------------
+# Geometry helpers
+# -----------------------------
+
+def cube(name, loc, scale, mat, col, bevel=0.03):
+    bpy.ops.mesh.primitive_cube_add(location=loc)
     obj = bpy.context.object
     obj.name = name
     obj.scale = scale
     apply_material(obj, mat)
+    add_bevel(obj, bevel, 2)
     obj.cast_shadow = True
     obj.receive_shadow = True
-    link_to_collection(obj, col)
+    move_to_collection(obj, col)
     return obj
 
 
-def add_cylinder(name, location, radius, depth, mat, col, vertices=24, rotation=(0, 0, 0)):
-    bpy.ops.mesh.primitive_cylinder_add(vertices=vertices, radius=radius, depth=depth, location=location, rotation=rotation)
+def cyl(name, loc, radius, depth, mat, col, vertices=32, rotation=(0,0,0), bevel=False):
+    bpy.ops.mesh.primitive_cylinder_add(vertices=vertices, radius=radius, depth=depth, location=loc, rotation=rotation)
     obj = bpy.context.object
     obj.name = name
     apply_material(obj, mat)
+    shade_smooth(obj)
+    if bevel:
+        add_bevel(obj, 0.015, 1)
     obj.cast_shadow = True
     obj.receive_shadow = True
-    link_to_collection(obj, col)
+    move_to_collection(obj, col)
+    return obj
+
+
+def plane(name, loc, scale, mat, col, rot=(0,0,0)):
+    bpy.ops.mesh.primitive_plane_add(location=loc, rotation=rot)
+    obj = bpy.context.object
+    obj.name = name
+    obj.scale = scale
+    apply_material(obj, mat)
+    obj.receive_shadow = True
+    move_to_collection(obj, col)
     return obj
 
 
@@ -184,15 +244,15 @@ def look_at(obj, target):
     obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
-def add_line(name, points, mat, col, bevel=0.035):
-    curve = bpy.data.curves.new(name, type="CURVE")
+def line_obj(name, pts, mat, col, bevel=.025):
+    curve = bpy.data.curves.new(name, "CURVE")
     curve.dimensions = "3D"
     curve.resolution_u = 2
     curve.bevel_depth = bevel
     curve.bevel_resolution = 2
     spl = curve.splines.new("POLY")
-    spl.points.add(len(points) - 1)
-    for p, co in zip(spl.points, points):
+    spl.points.add(len(pts) - 1)
+    for p, co in zip(spl.points, pts):
         p.co = (co[0], co[1], co[2], 1)
     obj = bpy.data.objects.new(name, curve)
     obj.data.materials.append(mat)
@@ -200,355 +260,418 @@ def add_line(name, points, mat, col, bevel=0.035):
     return obj
 
 
-def add_wire_box(name, center, size, mat, col, bevel=0.025):
-    x, y, z = center
-    w, d, h = size
-    xs = [x - w / 2, x + w / 2]
-    ys = [y - d / 2, y + d / 2]
-    zs = [z - h / 2, z + h / 2]
-    corners = [(a, b, c) for a in xs for b in ys for c in zs]
-    def c(ix, iy, iz): return (xs[ix], ys[iy], zs[iz])
+def wire_box(name, center, size, mat, col, bevel=.018):
+    x,y,z = center
+    w,d,h = size
+    xs = [x-w/2, x+w/2]
+    ys = [y-d/2, y+d/2]
+    zs = [z-h/2, z+h/2]
+    def c(a,b,c_): return (xs[a], ys[b], zs[c_])
     edges = [
-        (c(0,0,0), c(1,0,0)), (c(0,1,0), c(1,1,0)), (c(0,0,1), c(1,0,1)), (c(0,1,1), c(1,1,1)),
-        (c(0,0,0), c(0,1,0)), (c(1,0,0), c(1,1,0)), (c(0,0,1), c(0,1,1)), (c(1,0,1), c(1,1,1)),
-        (c(0,0,0), c(0,0,1)), (c(1,0,0), c(1,0,1)), (c(0,1,0), c(0,1,1)), (c(1,1,0), c(1,1,1)),
+        (c(0,0,0),c(1,0,0)),(c(0,1,0),c(1,1,0)),(c(0,0,1),c(1,0,1)),(c(0,1,1),c(1,1,1)),
+        (c(0,0,0),c(0,1,0)),(c(1,0,0),c(1,1,0)),(c(0,0,1),c(0,1,1)),(c(1,0,1),c(1,1,1)),
+        (c(0,0,0),c(0,0,1)),(c(1,0,0),c(1,0,1)),(c(0,1,0),c(0,1,1)),(c(1,1,0),c(1,1,1)),
     ]
-    group = []
-    for i, (a, b) in enumerate(edges):
-        group.append(add_line(f"{name}_edge_{i}", [a, b], mat, col, bevel))
-    return group
+    for i,(a,b) in enumerate(edges):
+        line_obj(f"{name}_{i}", [a,b], mat, col, bevel)
 
 
-# --------------------------
-# Materials
-# --------------------------
+def make_text(name, body, loc, size, mat, col, rot=(math.radians(90),0,0), align="CENTER"):
+    bpy.ops.object.text_add(location=loc, rotation=rot)
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.body = body
+    obj.data.align_x = align
+    obj.data.align_y = "CENTER"
+    obj.data.size = size
+    obj.data.extrude = 0.018
+    apply_material(obj, mat)
+    move_to_collection(obj, col)
+    return obj
 
-def build_materials(colors):
+
+# -----------------------------
+# Realistic stage construction
+# -----------------------------
+
+def build_led_texture():
+    img = bpy.data.images.new("procedural_led_wall_graphic", 1600, 900, alpha=False)
+    pixels = []
+    for y in range(900):
+        v = y / 899
+        for x in range(1600):
+            u = x / 1599
+            wave = 0.18 * math.sin(u * 18 + v * 8) + 0.12 * math.sin(u * 6 - v * 14)
+            glow = max(0, 1 - ((u - .5)**2 * 5 + (v - .55)**2 * 8))
+            r = 0.025 + glow * 0.55 + wave * 0.08
+            g = 0.020 + glow * 0.38 + wave * 0.06
+            b = 0.018 + glow * 0.15
+            if abs(v - (.68 + 0.045 * math.sin(u * 8))) < .01:
+                r += .5; g += .35; b += .1
+            pixels.extend([min(1,r), min(1,g), min(1,b), 1])
+    img.pixels = pixels
+    return img
+
+
+def make_led_material(primary):
+    img = build_led_texture()
+    mat = bpy.data.materials.new("procedural_real_led_wall")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    bsdf = nodes.get("Principled BSDF")
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = img
+    links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if "Emission Color" in bsdf.inputs:
+        links.new(tex.outputs["Color"], bsdf.inputs["Emission Color"])
+    if "Emission Strength" in bsdf.inputs:
+        bsdf.inputs["Emission Strength"].default_value = 2.0
+    bsdf.inputs["Roughness"].default_value = .22
+    return mat
+
+
+def build_stage(scene_data, mats, stage_col):
+    stage_data = scene_data.get("stage", {})
+    led_data = scene_data.get("led_wall", {})
+    colors = scene_data.get("colors", {})
+    w = float(stage_data.get("width", 60))
+    d = float(stage_data.get("depth", 24))
+    h = float(stage_data.get("height", 4))
+    led_w = float(led_data.get("width", 40))
+    led_h = float(led_data.get("height", 12))
     primary = hex_to_rgba(colors.get("primary", "#D7A94B"))
-    secondary = hex_to_rgba(colors.get("secondary", "#FFD487"))
-    return {
-        "floor": make_principled_material("dark_reflective_floor", (0.015, 0.016, 0.02, 1), 0.18, 0.65),
-        "stage": make_principled_material("matte_black_stage", (0.045, 0.047, 0.055, 1), 0.34, 0.45),
-        "gold": make_principled_material("brushed_gold_trim", primary, 0.24, 0.9),
-        "black_metal": make_principled_material("black_metal_truss", (0.006, 0.007, 0.009, 1), 0.28, 0.85),
-        "seating": make_principled_material("premium_black_seating", (0.02, 0.022, 0.028, 1), 0.48, 0.2),
-        "screen": make_emission_material("led_screen_emission", primary, 3.8),
-        "accent": make_emission_material("accent_light_emission", secondary, 2.8),
-        "beam": make_emission_material("soft_spotlight_beam", secondary, 1.1, 0.17),
-        "sketch": make_emission_material("sketch_white_lines", (0.86, 0.9, 0.96, 1), 0.9, 0.58),
-        "sketch_dim": make_emission_material("dimension_lines", (1, 0.88, 0.58, 1), 1.15, 0.82),
-        "transparent": make_principled_material("soft_transparent_shell", (0.7, 0.85, 1, 0.08), 0.8, 0, 0.08),
-    }
 
+    # Main layered stage with realistic bevels
+    cube("main_stage_black_laminate", (0, 0, h/2), (w/2, d/2, h/2), mats["stage"], stage_col, .08)
+    cube("stage_front_face_dark", (0, -d/2-.08, h/2), (w/2, .09, h/2), mats["stage_side"], stage_col, .03)
+    cube("stage_gold_front_lip", (0, -d/2-.24, h+.12), (w/2+.35, .13, .12), mats["gold"], stage_col, .035)
+    cube("stage_gold_left_lip", (-w/2-.18, 0, h+.12), (.12, d/2+.25, .12), mats["gold"], stage_col, .035)
+    cube("stage_gold_right_lip", (w/2+.18, 0, h+.12), (.12, d/2+.25, .12), mats["gold"], stage_col, .035)
 
-# --------------------------
-# Realistic stage
-# --------------------------
+    # Steps and risers
+    for i in range(4):
+        cube(f"real_step_layer_{i+1}", (0, -d/2 - 1.1 - i*1.05, .22 + i*.18),
+             (w*.26 - i*2.1, .48, .20), mats["stage"], stage_col, .045)
+        cube(f"real_step_gold_nose_{i+1}", (0, -d/2 - .62 - i*1.05, .45 + i*.18),
+             (w*.26 - i*2.0, .055, .04), mats["gold"], stage_col, .018)
 
-def build_realistic_stage(scene_data, mats, col):
-    stage = scene_data.get("stage", {})
-    led = scene_data.get("led_wall", {})
-    width = float(stage.get("width", 60))
-    depth = float(stage.get("depth", 24))
-    height = float(stage.get("height", 4))
-    led_w = float(led.get("width", 40))
-    led_h = float(led.get("height", 12))
+    # Curved / segmented LED wall illusion
+    led_mat = make_led_material(primary)
+    segments = 9
+    radius = 38
+    center_y = d/2 + 6.4
+    arc = math.radians(42)
+    for i in range(segments):
+        t = (i - (segments-1)/2) / ((segments-1)/2)
+        theta = t * arc/2
+        seg_w = led_w / segments * 1.08
+        x = math.sin(theta) * radius
+        y = center_y - math.cos(theta) * radius + radius
+        panel = cube(f"curved_led_panel_{i+1}", (x, y, h + led_h/2), (seg_w/2, .12, led_h/2), led_mat, stage_col, .025)
+        panel.rotation_euler[2] = -theta
 
-    # Main stage and risers
-    add_cube("main_stage_platform", (0, 0, height / 2), (width / 2, depth / 2, height / 2), mats["stage"], col)
-    add_cube("front_gold_trim", (0, -depth / 2 - 0.08, height + 0.08), (width / 2, 0.12, 0.08), mats["gold"], col)
-    add_cube("left_gold_trim", (-width / 2 - 0.08, 0, height + 0.08), (0.08, depth / 2, 0.08), mats["gold"], col)
-    add_cube("right_gold_trim", (width / 2 + 0.08, 0, height + 0.08), (0.08, depth / 2, 0.08), mats["gold"], col)
+    # LED overlay text
+    make_text("led_title_vision", "VISION", (0, d/2+0.08, h + led_h*.66), 3.2, mats["gold"], stage_col)
+    make_text("led_title_ignited", "IGNITED", (0, d/2+0.06, h + led_h*.45), 3.2, mats["gold"], stage_col)
+    make_text("led_subtitle", "CREATE WITHOUT LIMITS", (0, d/2+0.04, h + led_h*.24), 1.05, mats["accent"], stage_col)
 
-    for i in range(3):
-        add_cube(f"front_step_{i+1}", (0, -depth / 2 - 2.0 - i * 1.15, 0.28 + i * 0.22),
-                 (width * 0.34 - i * 3, 0.55, 0.22), mats["stage"], col)
+    # Scenic side towers and gold diagonal trims
+    tower_w = max(3.6, w*.065)
+    for side, x, sign in [("left", -led_w/2 - tower_w*1.15, -1), ("right", led_w/2 + tower_w*1.15, 1)]:
+        cube(f"{side}_tall_scenic_tower", (x, d/2+0.2, h+led_h/2), (tower_w/2, .45, led_h*.52), mats["dark_metal"], stage_col, .06)
+        for k in range(5):
+            bar = cube(f"{side}_diagonal_gold_light_{k}", (x + sign*(-1.1+k*.55), d/2-.22, h+2.0+k*1.55),
+                       (.055, .09, 1.55), mats["gold"], stage_col, .014)
+            bar.rotation_euler[1] = math.radians(sign*23)
 
-    # LED wall and scenic panels
-    bpy.ops.mesh.primitive_cube_add(location=(0, depth / 2 + 0.28, height + led_h / 2))
-    wall = bpy.context.object
-    wall.name = "realistic_led_wall"
-    wall.scale = (led_w / 2, 0.16, led_h / 2)
-    apply_material(wall, mats["screen"])
-    link_to_collection(wall, col)
+    # Truss: cylinders instead of cubes
+    truss_z = h + led_h + 2.2
+    y_front = d/2 - 4.3
+    y_back = d/2 + 1.8
+    x_left = -w*.43
+    x_right = w*.43
+    cyl("truss_front_tube", (0, y_front, truss_z), .11, x_right-x_left, mats["dark_metal"], stage_col, 32, (0, math.radians(90), 0))
+    cyl("truss_back_tube", (0, y_back, truss_z), .11, x_right-x_left, mats["dark_metal"], stage_col, 32, (0, math.radians(90), 0))
+    cyl("truss_left_tube", (x_left, (y_front+y_back)/2, truss_z), .11, y_back-y_front, mats["dark_metal"], stage_col, 32, (math.radians(90), 0, 0))
+    cyl("truss_right_tube", (x_right, (y_front+y_back)/2, truss_z), .11, y_back-y_front, mats["dark_metal"], stage_col, 32, (math.radians(90), 0, 0))
+    for x in [x_left, x_right]:
+        for yy in [y_front, y_back]:
+            cyl(f"truss_drop_{x}_{yy}", (x, yy, truss_z-5.4), .09, 10.8, mats["dark_metal"], stage_col, 24)
+    for x in [x_left + i*4 for i in range(int((x_right-x_left)/4)+1)]:
+        cyl(f"truss_cross_x_{x}", (x, (y_front+y_back)/2, truss_z), .055, y_back-y_front, mats["dark_metal"], stage_col, 18, (math.radians(90), 0, 0))
 
-    # Text on LED screen
-    for txt, z, size in [("VISION", height + led_h * 0.62, 3.8), ("IGNITED", height + led_h * 0.42, 3.8), ("CREATE WITHOUT LIMITS", height + led_h * 0.22, 1.25)]:
-        bpy.ops.object.text_add(location=(0, depth / 2 - 0.02, z), rotation=(math.radians(90), 0, 0))
-        t = bpy.context.object
-        t.name = "led_text_" + txt.lower().replace(" ", "_")
-        t.data.body = txt
-        t.data.align_x = "CENTER"
-        t.data.align_y = "CENTER"
-        t.data.size = size
-        t.data.extrude = 0.015
-        apply_material(t, mats["gold"])
-        link_to_collection(t, col)
+    # Moving head lights and physical beams
+    for i, x in enumerate([-22, -16, -10, -4, 4, 10, 16, 22]):
+        cyl(f"moving_head_yoke_{i}", (x, y_front, truss_z-.48), .34, .38, mats["dark_metal"], stage_col, 24, (math.radians(90),0,0))
+        lamp = cyl(f"moving_head_lens_{i}", (x, y_front-.22, truss_z-.86), .26, .32, mats["accent"], stage_col, 32, (math.radians(90),0,0))
+        look_target = (x*.16, -d/2+2.2, h+.55)
 
-    panel_w = max(4, width * 0.075)
-    for x, side in [(-(led_w / 2 + panel_w * 0.8), "left"), ((led_w / 2 + panel_w * 0.8), "right")]:
-        add_cube(f"{side}_scenic_panel", (x, depth / 2 + 0.18, height + led_h / 2),
-                 (panel_w / 2, 0.13, led_h * 0.48), mats["black_metal"], col)
-        for k in range(4):
-            add_cube(f"{side}_gold_slash_{k}", (x + (-0.9 + k * 0.55), depth / 2 - 0.02, height + 2.8 + k * 1.6),
-                     (0.055, 0.08, 2.1), mats["gold"], col).rotation_euler[1] = math.radians(18 if side == "left" else -18)
-
-    # Truss rectangle
-    truss_z = height + led_h + 2.2
-    truss_y = depth / 2 - 1.8
-    add_cube("truss_front", (0, truss_y - 4.2, truss_z), (width * 0.42, 0.10, 0.10), mats["black_metal"], col)
-    add_cube("truss_back", (0, truss_y + 1.0, truss_z), (width * 0.42, 0.10, 0.10), mats["black_metal"], col)
-    add_cube("truss_left", (-width * 0.42, truss_y - 1.6, truss_z), (0.10, 2.6, 0.10), mats["black_metal"], col)
-    add_cube("truss_right", (width * 0.42, truss_y - 1.6, truss_z), (0.10, 2.6, 0.10), mats["black_metal"], col)
-
-    # Moving heads + beams
-    for i, x in enumerate([-20, -14, -8, -2, 4, 10, 16, 22]):
-        add_cylinder(f"moving_head_{i}", (x, truss_y - 4.2, truss_z - 0.55), 0.38, 0.75, mats["black_metal"], col, 18, (math.radians(90), 0, 0))
-        bpy.ops.object.light_add(type="SPOT", location=(x, truss_y - 4.2, truss_z - 0.9))
+        bpy.ops.object.light_add(type="SPOT", location=(x, y_front-.35, truss_z-.9))
         spot = bpy.context.object
-        spot.name = f"stage_spot_{i}"
-        spot.data.energy = 950
-        spot.data.color = (1.0, 0.78, 0.43)
-        spot.data.spot_size = math.radians(32)
-        look_at(spot, (x * 0.18, -depth / 2 + 2, height + 0.4))
-        link_to_collection(spot, col)
+        spot.name = f"real_spotlight_{i}"
+        spot.data.energy = 1450
+        spot.data.color = (1, .76, .42)
+        spot.data.spot_size = math.radians(28)
+        spot.data.spot_blend = .55
+        look_at(spot, look_target)
+        move_to_collection(spot, stage_col)
 
-        bpy.ops.mesh.primitive_cone_add(vertices=32, radius1=2.0, radius2=0.22, depth=9.5, location=(x * 0.55, truss_y - 6.7, truss_z - 4.8))
+        bpy.ops.mesh.primitive_cone_add(vertices=48, radius1=2.4, radius2=.18, depth=10.5, location=(x*.58, y_front-4.9, truss_z-5.0))
         beam = bpy.context.object
-        beam.name = f"visible_light_beam_{i}"
-        beam.rotation_euler[0] = math.radians(16)
+        beam.name = f"soft_visible_light_cone_{i}"
+        beam.rotation_euler[0] = math.radians(14)
         apply_material(beam, mats["beam"])
-        link_to_collection(beam, col)
+        move_to_collection(beam, stage_col)
 
-    # Podium
-    add_cube("premium_podium", (-width * 0.34, -depth * 0.16, height + 1.25), (1.4, 0.75, 1.25), mats["stage"], col)
-    add_cube("podium_gold_cap", (-width * 0.34, -depth * 0.16, height + 2.55), (1.55, 0.85, 0.12), mats["gold"], col)
+    # Speaker stacks
+    for side, x in [("left", -w/2-3.2), ("right", w/2+3.2)]:
+        for z in [h+1.0, h+2.45, h+3.9]:
+            box = cube(f"{side}_speaker_box_{z:.1f}", (x, -d/2+3, z), (1.1, .75, .6), mats["speaker"], stage_col, .035)
+            cyl(f"{side}_speaker_driver_{z:.1f}_a", (x, -d/2+2.22, z+.13), .22, .045, mats["dark_metal"], stage_col, 24, (math.radians(90),0,0))
+            cyl(f"{side}_speaker_driver_{z:.1f}_b", (x, -d/2+2.22, z-.18), .18, .045, mats["dark_metal"], stage_col, 24, (math.radians(90),0,0))
 
-    # Foreground lounge seating
-    sofa_y = -depth / 2 - 8
-    for x in [-12, 0, 12]:
-        add_cube(f"vip_sofa_base_{x}", (x, sofa_y, 0.6), (2.8, 0.75, 0.35), mats["seating"], col)
-        add_cube(f"vip_sofa_back_{x}", (x, sofa_y + 0.65, 1.25), (2.8, 0.20, 0.75), mats["seating"], col)
-        add_cube(f"vip_table_{x}", (x + 3.4, sofa_y - 0.2, 0.35), (0.55, 0.55, 0.12), mats["gold"], col)
+    # Premium podium
+    cube("premium_black_podium_body", (-w*.34, -d*.16, h+1.05), (1.25,.78,1.05), mats["stage_side"], stage_col, .06)
+    cube("podium_gold_top", (-w*.34, -d*.16, h+2.18), (1.44,.92,.10), mats["gold"], stage_col, .025)
+    cube("podium_gold_logo_plate", (-w*.34, -d*.55, h+1.05), (.42,.035,.42), mats["gold"], stage_col, .018)
 
-    return {"stage_width": width, "stage_depth": depth, "stage_height": height}
+    # VIP foreground lounge furniture with legs
+    sofa_y = -d/2 - 9.2
+    for idx, x in enumerate([-13, 0, 13]):
+        cube(f"vip_sofa_{idx}_seat", (x, sofa_y, .58), (2.7,.76,.32), mats["seat_fabric"], stage_col, .10)
+        cube(f"vip_sofa_{idx}_back", (x, sofa_y+.68, 1.22), (2.7,.18,.78), mats["seat_fabric"], stage_col, .09)
+        cube(f"vip_sofa_{idx}_arm_l", (x-2.85, sofa_y, .90), (.18,.74,.62), mats["seat_fabric"], stage_col, .05)
+        cube(f"vip_sofa_{idx}_arm_r", (x+2.85, sofa_y, .90), (.18,.74,.62), mats["seat_fabric"], stage_col, .05)
+        for lx in [-1.8, 1.8]:
+            for ly in [-.45, .45]:
+                cyl(f"vip_sofa_{idx}_leg_{lx}_{ly}", (x+lx, sofa_y+ly, .24), .055, .48, mats["seat_metal"], stage_col, 14)
+
+        # Cocktail table
+        cyl(f"round_table_top_{idx}", (x+4.2, sofa_y-.12, .62), .78, .07, mats["gold"], stage_col, 36)
+        cyl(f"round_table_stem_{idx}", (x+4.2, sofa_y-.12, .34), .055, .58, mats["gold"], stage_col, 18)
+        cyl(f"round_table_base_{idx}", (x+4.2, sofa_y-.12, .06), .48, .06, mats["dark_metal"], stage_col, 36)
+
+    return {"width": w, "depth": d, "height": h, "led_h": led_h}
 
 
-def build_audience(scene_data, mats, col):
+def build_audience(scene_data, mats, stage_col):
     aud = scene_data.get("audience", {})
-    rows = int(aud.get("rows", 6))
-    cols = int(aud.get("cols", 10))
-    spacing_x = 2.3
-    spacing_y = 2.45
-    start_y = -22
+    rows = int(aud.get("rows", 7))
+    cols = int(aud.get("cols", 12))
+    start_y = -28
     for r in range(rows):
         count = cols + (1 if r % 2 else 0)
         for c in range(count):
-            x = (c - (count - 1) / 2) * spacing_x
-            y = start_y - r * spacing_y
-            add_cube(f"seat_{r}_{c}_base", (x, y, 0.42), (0.44, 0.44, 0.22), mats["seating"], col)
-            add_cube(f"seat_{r}_{c}_back", (x, y + 0.35, 0.92), (0.44, 0.08, 0.48), mats["seating"], col)
+            x = (c - (count - 1)/2) * 2.05
+            y = start_y - r * 2.25
+            cube(f"chair_{r}_{c}_seat", (x,y,.48), (.44,.44,.18), mats["seat_fabric"], stage_col, .045)
+            cube(f"chair_{r}_{c}_back", (x,y+.35,.98), (.44,.075,.42), mats["seat_fabric"], stage_col, .035)
+            for lx in [-.29,.29]:
+                for ly in [-.25,.25]:
+                    cyl(f"chair_{r}_{c}_leg_{lx}_{ly}", (x+lx,y+ly,.25), .025, .45, mats["seat_metal"], stage_col, 8)
 
 
-# --------------------------
-# Sketch environment
-# --------------------------
+# -----------------------------
+# Sketchy environment
+# -----------------------------
 
-def build_sketch_environment(scene_data, mats, col):
+def build_sketch_environment(scene_data, mats, env_col):
     stage = scene_data.get("stage", {})
-    width = float(stage.get("width", 60))
-    depth = float(stage.get("depth", 24))
+    w = float(stage.get("width", 60))
+    d = float(stage.get("depth", 24))
 
-    # Venue shell and floor planning grid
-    add_wire_box("venue_shell_wireframe", (0, -8, 13), (width + 28, depth + 54, 26), mats["sketch"], col, 0.025)
-    for x in range(-42, 43, 6):
-        add_line(f"floor_grid_x_{x}", [(x, -58, 0.04), (x, 28, 0.04)], mats["sketch"], col, 0.012)
-    for y in range(-58, 29, 6):
-        add_line(f"floor_grid_y_{y}", [(-42, y, 0.04), (42, y, 0.04)], mats["sketch"], col, 0.012)
+    wire_box("venue_shell_sketch", (0,-12,14), (w+36, d+64, 28), mats["sketch"], env_col, .018)
+    # Floor grid
+    for x in range(-50, 51, 5):
+        line_obj(f"sketch_floor_x_{x}", [(x,-66,.06),(x,32,.06)], mats["sketch"], env_col, .008)
+    for y in range(-66, 33, 5):
+        line_obj(f"sketch_floor_y_{y}", [(-50,y,.06),(50,y,.06)], mats["sketch"], env_col, .008)
 
-    # Far seating blocks as sketch/wire blocks
-    for r in range(4):
-        for s, x in enumerate([-28, 28]):
-            add_wire_box(f"sketch_far_seating_{r}_{s}", (x, -22 - r * 7, 1.0), (12, 4.2, 2.0), mats["sketch"], col, 0.018)
+    # Far seating blocks as architecture diagram
+    for r in range(5):
+        for side, x in [("L",-36),("R",36)]:
+            wire_box(f"sketch_tier_{side}_{r}", (x, -22-r*7, 1.25), (14,4.2,2.5), mats["sketch"], env_col, .015)
 
-    # Venue architectural outlines
-    for i, x in enumerate([-40, -32, -24, 24, 32, 40]):
-        h = 7 + (i % 3) * 2.4
-        add_wire_box(f"context_tower_{i}", (x, 20 - (i % 2) * 5, h / 2), (4 + i % 2, 4, h), mats["sketch"], col, 0.018)
+    # Venue columns / skyline / context
+    for i,x in enumerate([-45,-37,-30,-24,24,30,37,45]):
+        h = 7 + (i % 4)*2.8
+        wire_box(f"context_architecture_{i}", (x, 22-(i%2)*5, h/2), (3.8+(i%2),3.2,h), mats["sketch"], env_col, .014)
 
-    # Trees/context shapes
-    for i, (x, y) in enumerate([(-36, -2), (-41, -16), (36, -2), (41, -16), (-34, 18), (34, 18)]):
-        add_line(f"tree_trunk_{i}", [(x, y, 0), (x, y, 2.5)], mats["sketch"], col, 0.018)
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=8, ring_count=4, radius=1.6, location=(x, y, 4.0))
-        crown = bpy.context.object
-        crown.name = f"tree_crown_wire_{i}"
-        apply_material(crown, mats["transparent"])
-        link_to_collection(crown, col)
-        crown.display_type = "WIRE"
-        add_wire_box(f"tree_hint_box_{i}", (x, y, 4), (3.2, 3.2, 3.2), mats["sketch"], col, 0.013)
+    # Tree/context objects
+    for i,(x,y,s) in enumerate([(-43,-5,1.0),(-45,-20,1.3),(43,-5,1.0),(45,-20,1.3),(-38,20,1.1),(38,20,1.1)]):
+        line_obj(f"tree_trunk_{i}", [(x,y,0),(x,y,2.8*s)], mats["sketch"], env_col, .015)
+        wire_box(f"tree_crown_wire_{i}", (x,y,4.1*s), (3.2*s,3.2*s,3.2*s), mats["sketch"], env_col, .011)
 
-    # Directional circulation arrows
-    for i, y in enumerate([-36, -30, -24]):
-        add_line(f"flow_arrow_line_{i}", [(-36, y, 0.08), (-18, y + 4, 0.08)], mats["sketch_dim"], col, 0.025)
-        add_line(f"flow_arrow_head_a_{i}", [(-18, y + 4, 0.08), (-20, y + 2.2, 0.08)], mats["sketch_dim"], col, 0.025)
-        add_line(f"flow_arrow_head_b_{i}", [(-18, y + 4, 0.08), (-20.4, y + 5.2, 0.08)], mats["sketch_dim"], col, 0.025)
+    # Flow arrows
+    for i,y in enumerate([-46,-39,-32]):
+        line_obj(f"flow_arrow_{i}", [(-44,y,.1),(-22,y+5,.1)], mats["sketch_bright"], env_col, .018)
+        line_obj(f"flow_arrow_head_a_{i}", [(-22,y+5,.1),(-24.5,y+3,.1)], mats["sketch_bright"], env_col, .018)
+        line_obj(f"flow_arrow_head_b_{i}", [(-22,y+5,.1),(-25,y+6.5,.1)], mats["sketch_bright"], env_col, .018)
 
 
-def build_dimensions(scene_data, mats, col):
+def build_dimensions(scene_data, mats, dim_col):
     stage = scene_data.get("stage", {})
-    width = float(stage.get("width", 60))
-    depth = float(stage.get("depth", 24))
     led = scene_data.get("led_wall", {})
+    w = float(stage.get("width", 60))
+    d = float(stage.get("depth", 24))
     led_h = float(led.get("height", 12))
+    z=.14
+    y=-d/2-5.5
+    x=w/2+6.2
+    line_obj("dim_stage_width", [(-w/2,y,z),(w/2,y,z)], mats["sketch_bright"], dim_col, .03)
+    line_obj("dim_stage_width_tick_l", [(-w/2,y-1,z),(-w/2,y+1,z)], mats["sketch_bright"], dim_col, .025)
+    line_obj("dim_stage_width_tick_r", [(w/2,y-1,z),(w/2,y+1,z)], mats["sketch_bright"], dim_col, .025)
+    make_text("dim_stage_width_label", f"{w:.0f}.00 m", (0,y-1.6,z+.15), .9, mats["sketch_bright"], dim_col, (math.radians(90),0,0))
 
-    z = 0.12
-    y = -depth / 2 - 5.2
-    add_line("dim_stage_width", [(-width / 2, y, z), (width / 2, y, z)], mats["sketch_dim"], col, 0.035)
-    add_line("dim_width_tick_l", [(-width / 2, y - 1.2, z), (-width / 2, y + 1.2, z)], mats["sketch_dim"], col, 0.03)
-    add_line("dim_width_tick_r", [(width / 2, y - 1.2, z), (width / 2, y + 1.2, z)], mats["sketch_dim"], col, 0.03)
+    line_obj("dim_led_height", [(x,d/2+.4,4),(x,d/2+.4,4+led_h)], mats["sketch_bright"], dim_col, .03)
+    make_text("dim_led_height_label", f"{led_h:.0f}.00 m", (x+1.2,d/2+.4,4+led_h/2), .75, mats["sketch_bright"], dim_col, (math.radians(90),0,math.radians(90)))
 
-    x = width / 2 + 5.4
-    add_line("dim_led_height", [(x, depth / 2 + 0.4, 4), (x, depth / 2 + 0.4, 4 + led_h)], mats["sketch_dim"], col, 0.035)
-    add_line("dim_venue_depth", [(width / 2 + 7, -52, z), (width / 2 + 7, depth / 2, z)], mats["sketch_dim"], col, 0.025)
-
-    # Text labels as 3D text
-    for body, loc, rot, size in [
-        (f"{width:.0f}.00 m", (0, y - 1.2, z + 0.15), (math.radians(90), 0, 0), 1.0),
-        (f"{led_h:.0f}.00 m", (x + 1.1, depth / 2 + 0.4, 4 + led_h / 2), (math.radians(90), 0, math.radians(90)), 0.8),
-        ("36.00 m", (width / 2 + 8.4, -25, z + 0.15), (math.radians(90), 0, math.radians(90)), 0.8),
-    ]:
-        bpy.ops.object.text_add(location=loc, rotation=rot)
-        t = bpy.context.object
-        t.name = "dimension_label_" + body.replace(" ", "_")
-        t.data.body = body
-        t.data.align_x = "CENTER"
-        t.data.align_y = "CENTER"
-        t.data.size = size
-        t.data.extrude = 0.01
-        apply_material(t, mats["sketch_dim"])
-        link_to_collection(t, col)
+    line_obj("dim_depth", [(w/2+8,-52,z),(w/2+8,d/2,z)], mats["sketch_bright"], dim_col, .022)
+    make_text("dim_depth_label", "36.00 m", (w/2+9.2,-25,z+.15), .75, mats["sketch_bright"], dim_col, (math.radians(90),0,math.radians(90)))
 
 
-# --------------------------
-# Camera, render, export
-# --------------------------
+# -----------------------------
+# Lighting, rendering, outputs
+# -----------------------------
 
-def setup_lighting(scene_data, mats, stage_col):
+def setup_lights(scene_data, mats, col):
     colors = scene_data.get("colors", {})
     primary = hex_to_rgba(colors.get("primary", "#D7A94B"))
     secondary = hex_to_rgba(colors.get("secondary", "#FFD487"))
 
-    bpy.ops.object.light_add(type="AREA", location=(0, -18, 22))
+    # Big soft key
+    bpy.ops.object.light_add(type="AREA", location=(0,-30,24))
     key = bpy.context.object
-    key.name = "large_warm_key_light"
-    key.data.energy = 2800
-    key.data.size = 18
+    key.name = "cinematic_large_front_softbox"
+    key.data.energy = 2500
+    key.data.size = 24
     key.data.color = primary[:3]
-    link_to_collection(key, stage_col)
+    move_to_collection(key, col)
 
-    bpy.ops.object.light_add(type="AREA", location=(-24, -10, 15))
-    left = bpy.context.object
-    left.name = "left_soft_fill"
-    left.data.energy = 900
-    left.data.size = 10
-    left.data.color = secondary[:3]
-    link_to_collection(left, stage_col)
+    bpy.ops.object.light_add(type="AREA", location=(-24,-10,18))
+    l = bpy.context.object
+    l.name = "warm_left_fill"
+    l.data.energy = 950
+    l.data.size = 12
+    l.data.color = secondary[:3]
+    move_to_collection(l, col)
 
-    bpy.ops.object.light_add(type="AREA", location=(24, -10, 15))
-    right = bpy.context.object
-    right.name = "right_soft_fill"
-    right.data.energy = 900
-    right.data.size = 10
-    right.data.color = secondary[:3]
-    link_to_collection(right, stage_col)
+    bpy.ops.object.light_add(type="AREA", location=(24,-10,18))
+    r = bpy.context.object
+    r.name = "warm_right_fill"
+    r.data.energy = 950
+    r.data.size = 12
+    r.data.color = secondary[:3]
+    move_to_collection(r, col)
 
-    bpy.ops.object.light_add(type="SUN", location=(0, 0, 30))
-    sun = bpy.context.object
-    sun.name = "soft_global_sun"
-    sun.data.energy = 0.5
-    link_to_collection(sun, stage_col)
-
-
-def add_camera(name, location, target, lens):
-    bpy.ops.object.camera_add(location=location)
-    cam = bpy.context.object
-    cam.name = name
-    cam.data.lens = lens
-    look_at(cam, target)
-    return cam
+    bpy.ops.object.light_add(type="POINT", location=(0,-12,6))
+    p = bpy.context.object
+    p.name = "floor_reflection_glow"
+    p.data.energy = 420
+    p.data.color = primary[:3]
+    move_to_collection(p, col)
 
 
-def setup_render(width, height, samples=96, engine="CYCLES"):
+def setup_world():
+    world = bpy.context.scene.world or bpy.data.worlds.new("World")
+    bpy.context.scene.world = world
+    world.color = (0.002, 0.003, 0.005)
+
+
+def setup_render(width, height, samples=112):
     scene = bpy.context.scene
-    engine = (engine or "CYCLES").upper()
-    if engine not in ("CYCLES", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
-        engine = "CYCLES"
-
+    scene.render.engine = "CYCLES"
     try:
-        scene.render.engine = engine
-    except Exception:
-        scene.render.engine = "CYCLES"
-
-    if scene.render.engine == "CYCLES":
         scene.cycles.samples = int(samples)
         scene.cycles.use_adaptive_sampling = True
-        scene.cycles.max_bounces = 6
+        scene.cycles.max_bounces = 8
         scene.cycles.diffuse_bounces = 3
-        scene.cycles.glossy_bounces = 3
+        scene.cycles.glossy_bounces = 4
+        scene.cycles.transparent_max_bounces = 4
+        scene.cycles.use_denoising = True
         try:
-            bpy.context.preferences.addons["cycles"].preferences.compute_device_type = "CUDA"
-            scene.cycles.device = "GPU"
+            prefs = bpy.context.preferences.addons["cycles"].preferences
+            for dtype in ("OPTIX","CUDA","HIP","METAL","ONEAPI"):
+                try:
+                    prefs.compute_device_type = dtype
+                    scene.cycles.device = "GPU"
+                    break
+                except Exception:
+                    pass
         except Exception:
             scene.cycles.device = "CPU"
+    except Exception:
+        pass
 
     scene.render.resolution_x = int(width)
     scene.render.resolution_y = int(height)
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
     scene.render.film_transparent = False
+
     scene.view_settings.view_transform = "Filmic"
-    scene.view_settings.look = "Medium High Contrast"
-    scene.view_settings.exposure = 0
+    scene.view_settings.look = "High Contrast"
+    scene.view_settings.exposure = -0.05
     scene.view_settings.gamma = 1
 
 
-def set_collection_render_state(stage_col, env_col, dim_col, mode):
-    stage_col.hide_render = mode == "sketch"
-    env_col.hide_render = mode == "realistic"
-    dim_col.hide_render = mode == "realistic"
+def camera(name, loc, target, lens):
+    bpy.ops.object.camera_add(location=loc)
+    cam = bpy.context.object
+    cam.name = name
+    cam.data.lens = lens
+    cam.data.dof.use_dof = True
+    cam.data.dof.focus_distance = (Vector(target) - Vector(loc)).length
+    cam.data.dof.aperture_fstop = 6.5
+    look_at(cam, target)
+    return cam
 
 
-def render_view(output_dir, name, cam_cfg, target, width, height, samples, engine, stage_col, env_col, dim_col, mode):
-    set_collection_render_state(stage_col, env_col, dim_col, mode)
-    setup_render(width, height, samples, engine)
-    cam = add_camera("CAM_" + name, cam_cfg["location"], target, cam_cfg["lens"])
+def set_collection_visibility(stage_col, env_col, dim_col, mode):
+    # viewport + render
+    show_stage = mode != "sketch"
+    show_env = mode != "realistic"
+    show_dim = mode != "realistic"
+    stage_col.hide_render = not show_stage
+    env_col.hide_render = not show_env
+    dim_col.hide_render = not show_dim
+    for col, show in [(stage_col, show_stage), (env_col, show_env), (dim_col, show_dim)]:
+        col.hide_viewport = not show
+
+
+def render_one(output_dir, name, loc, target, lens, mode, width, height, samples, stage_col, env_col, dim_col):
+    set_collection_visibility(stage_col, env_col, dim_col, mode)
+    setup_render(width, height, samples)
+    cam = camera("CAM_" + name, loc, target, lens)
     bpy.context.scene.camera = cam
-    out_path = os.path.join(output_dir, f"{name}.png")
-    bpy.context.scene.render.filepath = out_path
+    path = os.path.join(output_dir, name + ".png")
+    bpy.context.scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
-    return out_path
+    return path
 
 
 def export_glb(output_dir, stage_col, env_col, dim_col):
-    # Export merged scene so frontend can show a real rotatable model if it loads GLB.
-    stage_col.hide_render = False
-    env_col.hide_render = False
-    dim_col.hide_render = False
-    glb_path = os.path.join(output_dir, "stage_sketch_environment.glb")
-    bpy.ops.export_scene.gltf(
-        filepath=glb_path,
-        export_format="GLB",
-        export_apply=True,
-        export_cameras=True,
-        export_lights=True,
-    )
-    return glb_path
+    set_collection_visibility(stage_col, env_col, dim_col, "merged")
+    path = os.path.join(output_dir, "stage_sketch_environment.glb")
+    try:
+        bpy.ops.export_scene.gltf(
+            filepath=path,
+            export_format="GLB",
+            export_apply=True,
+            export_cameras=True,
+            export_lights=True,
+            export_yup=True,
+        )
+    except TypeError:
+        bpy.ops.export_scene.gltf(filepath=path, export_format="GLB")
+    return path
 
 
 def write_manifest(output_dir, scene_data, renders, glb_path):
-    manifest = {
+    data = {
         "ok": True,
-        "type": "briefcraft_hybrid_3d_stage",
+        "type": "briefcraft_realistic_stage_sketch_environment_v3",
         "scene": scene_data,
         "renders": renders,
         "outputs": {
@@ -561,74 +684,63 @@ def write_manifest(output_dir, scene_data, renders, glb_path):
         },
         "glb": glb_path,
     }
-    manifest_path = os.path.join(output_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    return manifest_path
+    path = os.path.join(output_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return path
 
+
+# -----------------------------
+# Main
+# -----------------------------
 
 def main():
-    payload_path = get_json_path()
-    payload = load_payload(payload_path)
+    payload = load_payload(get_json_path())
     scene_data = payload.get("scene", {})
     render_data = payload.get("render", {})
 
     output_dir = render_data.get("output_dir", os.path.join(os.getcwd(), "briefcraft_render_output"))
     width = int(render_data.get("width", 1920))
     height = int(render_data.get("height", 1080))
-    samples = int(render_data.get("samples", 96))
-    engine = render_data.get("engine", "CYCLES")
+    samples = int(render_data.get("samples", 112))
     os.makedirs(output_dir, exist_ok=True)
 
     clear_scene()
+    setup_world()
 
     stage_col = ensure_collection("STAGE_REALISTIC")
     env_col = ensure_collection("ENVIRONMENT_SKETCH")
     dim_col = ensure_collection("DIMENSIONS")
 
-    mats = build_materials(scene_data.get("colors", {"primary": "#D7A94B", "secondary": "#FFD487"}))
+    colors = scene_data.get("colors", {"primary": "#D7A94B", "secondary": "#FFD487"})
+    mats = make_materials(colors)
 
-    # Global floor, linked to stage collection because it belongs to the realistic render too.
-    floor_size = 120
-    bpy.ops.mesh.primitive_plane_add(size=floor_size, location=(0, -10, 0))
-    floor = bpy.context.object
-    floor.name = "premium_dark_floor"
-    apply_material(floor, mats["floor"])
-    floor.receive_shadow = True
-    link_to_collection(floor, stage_col)
+    # Real reflective floor
+    plane("large_black_reflective_floor", (0, -14, 0), (72, 72, 1), mats["floor"], stage_col)
 
-    info = build_realistic_stage(scene_data, mats, stage_col)
+    stage_info = build_stage(scene_data, mats, stage_col)
     build_audience(scene_data, mats, stage_col)
     build_sketch_environment(scene_data, mats, env_col)
     build_dimensions(scene_data, mats, dim_col)
-    setup_lighting(scene_data, mats, stage_col)
+    setup_lights(scene_data, mats, stage_col)
 
-    target = tuple(scene_data.get("camera_target", [0, -2, 7]))
-    cameras = {
-        "realistic_view": {"location": (0, -58, 17), "lens": 34},
-        "sketch_concept": {"location": (-42, -46, 27), "lens": 31},
-        "merged_hybrid": {"location": (0, -62, 22), "lens": 30},
-        "stage_closeup": {"location": (18, -34, 13), "lens": 46},
-        "top_plan": {"location": (0, -10, 82), "lens": 28},
+    target = tuple(scene_data.get("camera_target", [0, -1.5, 7.5]))
+    cams = {
+        "realistic_view": ((0, -62, 20), target, 32, "realistic"),
+        "sketch_concept": ((-42, -48, 30), target, 30, "sketch"),
+        "merged_hybrid": ((0, -68, 24), target, 29, "merged"),
+        "stage_closeup": ((18, -34, 14), (0, 2, 8), 48, "realistic"),
+        "top_plan": ((0, -12, 86), (0, -12, 0), 28, "merged"),
     }
 
-    renders = {
-        "realistic_view": render_view(output_dir, "realistic_view", cameras["realistic_view"], target, width, height, samples, engine, stage_col, env_col, dim_col, "realistic"),
-        "sketch_concept": render_view(output_dir, "sketch_concept", cameras["sketch_concept"], target, width, height, samples, engine, stage_col, env_col, dim_col, "sketch"),
-        "merged_hybrid": render_view(output_dir, "merged_hybrid", cameras["merged_hybrid"], target, width, height, samples, engine, stage_col, env_col, dim_col, "merged"),
-        "stage_closeup": render_view(output_dir, "stage_closeup", cameras["stage_closeup"], target, width, height, samples, engine, stage_col, env_col, dim_col, "realistic"),
-        "top_plan": render_view(output_dir, "top_plan", cameras["top_plan"], (0, -10, 0), width, height, max(32, samples // 2), engine, stage_col, env_col, dim_col, "merged"),
-    }
+    renders = {}
+    for name, (loc, tgt, lens, mode) in cams.items():
+        renders[name] = render_one(output_dir, name, loc, tgt, lens, mode, width, height, samples, stage_col, env_col, dim_col)
 
-    glb_path = export_glb(output_dir, stage_col, env_col, dim_col)
-    manifest_path = write_manifest(output_dir, scene_data, renders, glb_path)
+    glb = export_glb(output_dir, stage_col, env_col, dim_col)
+    manifest = write_manifest(output_dir, scene_data, renders, glb)
 
-    print(json.dumps({
-        "ok": True,
-        "manifest": manifest_path,
-        "renders": renders,
-        "glb": glb_path,
-    }, indent=2))
+    print(json.dumps({"ok": True, "manifest": manifest, "renders": renders, "glb": glb}, indent=2))
 
 
 if __name__ == "__main__":
