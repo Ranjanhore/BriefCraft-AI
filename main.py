@@ -1113,7 +1113,8 @@ def generate_concepts(brief: str, ctx: Dict[str, Any], count: int = 3) -> List[D
     concepts: List[Dict[str, Any]] = []
     for i, arch in enumerate(selected):
         materials = material_sets[(i + rng.randrange(len(material_sets))) % len(material_sets)]
-        name = f"{arch['name']} - {ctx['brand'] if ctx['brand'] != 'Brand to be confirmed' else ctx['title'][:32]}"
+        fallback_title = ctx.get("title") or ctx.get("brief") or "Creative Experience"
+        name = f"{arch['name']} - {ctx['brand'] if ctx.get('brand') != 'Brand to be confirmed' else fallback_title[:32]}"
         one_liner = f"A {ctx['style_direction']} {ctx['industry']} direction that {rng.choice(verbs)} the brief through {arch['logic']}."
         concepts.append({
             "id": f"concept_{i + 1}_{arch['key']}",
@@ -2437,10 +2438,14 @@ def ensure_blender_project(project_id: str, req: BlenderRenderRequest) -> Dict[s
         return project
     brief = "Blender 3D scene request created from direct render endpoint."
     ctx = {
+        "title": "Blender 3D Scene Project",
+        "brief": brief,
         "brand": "Brand to be confirmed",
         "venue": "Venue to be confirmed",
+        "event_type": "3d_render",
         "industry": "creative experience",
         "style_direction": "premium cinematic",
+        "research": "Use UCD-approved brief, concept, CAD dimensions and production constraints before final render.",
     }
     concepts = generate_concepts(brief, ctx, 3)
     project = ensure_project_runtime({
