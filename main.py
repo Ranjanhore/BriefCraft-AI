@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -51,6 +51,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"[ERROR] Unhandled backend error at {request.url.path}: {exc}")
+    return JSONResponse(status_code=500, content={"ok": False, "detail": str(exc), "path": request.url.path})
 
 try:
     from cad_engine_pro import router as cad_pro_router
@@ -2513,11 +2519,60 @@ def create_blender_scene_direct(req: BlenderRenderRequest):
 
 
 @app.post("/blender/render")
-def render_blender_scene_direct(req: BlenderRenderRequest, background_tasks: BackgroundTasks):
+def render_blender_scene_direct(req: BlenderRenderRequest):
     if not req.project_id:
         raise HTTPException(status_code=422, detail="project_id is required.")
+    worker = blender_worker_status()
+    if not req.run_now:
+        try:
+            payload = blender_scene_payload(req.project_id, req.concept_index or 0, req.width, req.height, req.scene, req.render)
+        except Exception as exc:
+            print(f"[WARN] Blender scene payload fallback used: {exc}")
+            payload = {
+                "scene": req.scene or {
+                    "stage": {"width": 60, "depth": 24, "height": 4},
+                    "led_wall": {"type": "flat", "width": 40, "height": 12},
+                    "audience": {"rows": 6, "cols": 10},
+                    "colors": {"primary": "#1A5DFF", "secondary": "#A855F7"},
+                    "lighting": {"style": "futuristic"},
+                    "camera_target": [0, 0, 6],
+                },
+                "render": {"output_dir": str(BLENDER_OUTPUT_DIR / req.project_id), "width": req.width, "height": req.height},
+            }
+        try:
+            saved = save_blender_scene(req.project_id, payload)
+        except Exception as exc:
+            print(f"[WARN] Blender scene file save failed, returning payload only: {exc}")
+            saved = {
+                "scene_id": str(uuid.uuid4()),
+                "scene_path": None,
+                "scene_url": None,
+                "payload": payload,
+                "warning": f"Scene JSON could not be written on server: {exc}",
+            }
+        return {
+            "ok": True,
+            "project_id": req.project_id,
+            "mode": "scene_json_only",
+            "message": "Scene JSON created. Set BLENDER_BIN to produce real PNG/GLB renders on Render.",
+            "scene": saved,
+            "worker": worker,
+        }
     try:
-        return render_blender_scene(req.project_id, req, background_tasks)
+        project = ensure_blender_project(req.project_id, req)
+        payload = blender_scene_payload(req.project_id, req.concept_index or 0, req.width, req.height, req.scene, req.render)
+        saved = save_blender_scene(req.project_id, payload)
+        if not worker.get("configured"):
+            return {
+                "ok": True,
+                "project_id": req.project_id,
+                "mode": "scene_json_only",
+                "message": "Blender is not configured on Render. Scene JSON was created; server PNG rendering is skipped.",
+                "scene": saved,
+                "worker": worker,
+            }
+        render_result = run_blender_scene(saved["scene_path"])
+        return {"ok": True, "project_id": req.project_id, "project": project, "scene": saved, "render_result": render_result, "worker": worker}
     except HTTPException:
         raise
     except Exception as exc:
