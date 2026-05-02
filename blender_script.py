@@ -1,9 +1,10 @@
 import bpy
 import json
+import math
 import os
 import sys
-import math
 from mathutils import Vector
+
 
 CAMERAS = {
     "front_wide": {"location": (0, -28, 11), "lens": 28},
@@ -61,26 +62,18 @@ def apply_material(obj, mat):
         obj.data.materials.append(mat)
 
 
-def make_principled_material(
-    name: str,
-    base_color=(0.1, 0.1, 0.1, 1.0),
-    roughness=0.35,
-    metallic=0.0,
-):
+def make_principled_material(name: str, base_color=(0.1, 0.1, 0.1, 1.0), roughness=0.35, metallic=0.0):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
-
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
-    for n in list(nodes):
-        nodes.remove(n)
-
+    for node in list(nodes):
+        nodes.remove(node)
     output = nodes.new(type="ShaderNodeOutputMaterial")
     bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
     bsdf.inputs["Base Color"].default_value = base_color
     bsdf.inputs["Roughness"].default_value = roughness
     bsdf.inputs["Metallic"].default_value = metallic
-
     links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
     return mat
 
@@ -88,17 +81,14 @@ def make_principled_material(
 def make_emission_material(name: str, color=(0.2, 0.5, 1.0, 1.0), strength=4.0):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
-
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
-    for n in list(nodes):
-        nodes.remove(n)
-
+    for node in list(nodes):
+        nodes.remove(node)
     output = nodes.new(type="ShaderNodeOutputMaterial")
     emission = nodes.new(type="ShaderNodeEmission")
     emission.inputs["Color"].default_value = color
     emission.inputs["Strength"].default_value = strength
-
     links.new(emission.outputs["Emission"], output.inputs["Surface"])
     return mat
 
@@ -115,7 +105,6 @@ def build_stage(stage_data: dict):
     width = float(stage_data.get("width", 60))
     depth = float(stage_data.get("depth", 24))
     height = float(stage_data.get("height", 4))
-
     bpy.ops.mesh.primitive_cube_add(location=(0, 0, height / 2))
     stage = bpy.context.object
     stage.name = "Stage"
@@ -127,7 +116,6 @@ def build_led_wall(stage_data: dict, led_data: dict):
     stage_depth = float(stage_data.get("depth", 24))
     led_width = float(led_data.get("width", 40))
     led_height = float(led_data.get("height", 12))
-
     bpy.ops.mesh.primitive_plane_add(location=(0, stage_depth / 2, led_height / 2 + 1))
     wall = bpy.context.object
     wall.name = "LED_Wall"
@@ -139,7 +127,6 @@ def build_led_wall(stage_data: dict, led_data: dict):
 def build_side_panels(colors: dict):
     secondary = hex_to_rgba(colors.get("secondary", "#A855F7"))
     panel_mat = make_emission_material("AccentPanel", secondary, 2.5)
-
     panels = []
     for x in (-25, 25):
         bpy.ops.mesh.primitive_plane_add(location=(x, 8, 8))
@@ -158,14 +145,11 @@ def build_audience(audience: dict):
     spacing_x = 2.4
     spacing_y = 2.8
     start_y = -8
-
     chair_mat = make_principled_material("ChairMat", (0.15, 0.15, 0.18, 1), 0.5, 0.0)
-
     for r in range(rows):
         for c in range(cols):
             x = (c - (cols - 1) / 2) * spacing_x
             y = start_y - (r * spacing_y)
-
             bpy.ops.mesh.primitive_cube_add(location=(x, y, 0.45))
             chair = bpy.context.object
             chair.scale = (0.45, 0.45, 0.45)
@@ -244,17 +228,14 @@ def setup_cycles(width: int, height: int):
 def render_all(output_dir: str, target, width: int, height: int):
     setup_cycles(width, height)
     outputs = {}
-
     for name, cfg in CAMERAS.items():
         cam = add_camera(name, cfg["location"], cfg["lens"])
         point_camera_to(cam, target)
         bpy.context.scene.camera = cam
-
         out_path = os.path.join(output_dir, f"{name}.png")
         bpy.context.scene.render.filepath = out_path
         bpy.ops.render.render(write_still=True)
         outputs[name] = out_path
-
     return outputs
 
 
@@ -279,14 +260,12 @@ def write_manifest(output_dir: str, scene_data: dict, render_outputs: dict, glb_
 def main():
     payload_path = get_json_path()
     payload = load_payload(payload_path)
-
     scene_data = payload["scene"]
     render_data = payload["render"]
 
     output_dir = render_data["output_dir"]
     width = int(render_data.get("width", 1920))
     height = int(render_data.get("height", 1080))
-
     os.makedirs(output_dir, exist_ok=True)
 
     clear_scene()
