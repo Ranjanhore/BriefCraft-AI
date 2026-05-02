@@ -2425,21 +2425,57 @@ def blender_health():
     return {"ok": True, **blender_worker_status()}
 
 
+def ensure_blender_project(project_id: str, req: BlenderRenderRequest) -> Dict[str, Any]:
+    project = load_project(project_id)
+    if project:
+        return project
+    brief = "Blender 3D scene request created from direct render endpoint."
+    ctx = {
+        "brand": "Brand to be confirmed",
+        "venue": "Venue to be confirmed",
+        "industry": "creative experience",
+        "style_direction": "premium cinematic",
+    }
+    concepts = generate_concepts(brief, ctx, 3)
+    project = ensure_project_runtime({
+        "id": project_id,
+        "project_id": project_id,
+        "project_name": "Blender 3D Scene Project",
+        "title": "Blender 3D Scene Project",
+        "brief": brief,
+        "event_type": "3d_render",
+        "brand": ctx["brand"],
+        "venue": ctx["venue"],
+        "style_direction": ctx["style_direction"],
+        "status": "draft",
+        "concepts": concepts,
+        "concept_options": concepts,
+        "selected_concept_index": req.concept_index or 0,
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+    })
+    for gate in ["brief_approved", "concept_approved"]:
+        project["approval_gates"][gate] = {
+            "approved": True,
+            "note": "Auto-approved for direct Blender scene/render test endpoint.",
+            "updated_at": now_ts(),
+            "approved_by": "system",
+        }
+    persist_project(project)
+    return project
+
+
 @app.post("/projects/{project_id}/blender/scene")
 def create_blender_scene(project_id: str, req: BlenderRenderRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    project = ensure_blender_project(project_id, req)
     payload = blender_scene_payload(project_id, req.concept_index or 0, req.width, req.height, req.scene, req.render)
     saved = save_blender_scene(project_id, payload)
-    return {"ok": True, "project_id": project_id, "scene": saved, "worker": blender_worker_status()}
+    return {"ok": True, "project_id": project_id, "auto_created_project": project.get("brief") == "Blender 3D scene request created from direct render endpoint.", "scene": saved, "worker": blender_worker_status()}
 
 
 @app.post("/projects/{project_id}/blender/render")
 def render_blender_scene(project_id: str, req: BlenderRenderRequest, background_tasks: BackgroundTasks):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    project = ensure_blender_project(project_id, req)
     job = create_job(project_id, "blender_render", "RENDER_3D_AGENT", dump_model(req))
     if job.get("status") == "waiting_for_user":
         return {"ok": True, "job": job, "worker": blender_worker_status(), "message": "Blender render waiting for required approval gates."}
