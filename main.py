@@ -1098,6 +1098,18 @@ def selected_concept(project_id: str, concept_index: Optional[int] = 0) -> Dict[
 # =============================================================================
 
 def generate_concepts(brief: str, ctx: Dict[str, Any], count: int = 3) -> List[Dict[str, Any]]:
+    ctx = {
+        "title": "Creative Experience",
+        "brand": "Brand to be confirmed",
+        "venue": "Venue to be confirmed",
+        "event_type": "creative experience",
+        "industry": "creative experience",
+        "style_direction": "premium creative",
+        "budget": "not confirmed",
+        "dimensions": "to be confirmed",
+        "research": "Research brand, category, venue, technology and production references before final creative approval.",
+        **(ctx or {}),
+    }
     rng = rng_for("concepts", brief, ctx.get("brand"), ctx.get("industry"), ctx.get("style_direction"))
     archetypes = CONCEPT_ARCHETYPES[:]
     rng.shuffle(archetypes)
