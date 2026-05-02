@@ -1885,6 +1885,8 @@ def studio_frontend_contract():
             "blender_health": "/blender/health",
             "blender_scene": "/projects/{project_id}/blender/scene",
             "blender_render": "/projects/{project_id}/blender/render",
+            "blender_scene_direct": "/blender/scene",
+            "blender_render_direct": "/blender/render",
             "departments": "/project/{project_id}/departments/build",
             "pdfs": "/projects/{project_id}/pdfs",
             "presentation": "/projects/{project_id}/presentation/build",
@@ -2447,6 +2449,20 @@ def render_blender_scene(project_id: str, req: BlenderRenderRequest, background_
     else:
         background_tasks.add_task(execute_job, job["id"])
     return {"ok": True, "job": job, "worker": blender_worker_status()}
+
+
+@app.post("/blender/scene")
+def create_blender_scene_direct(req: BlenderRenderRequest):
+    if not req.project_id:
+        raise HTTPException(status_code=422, detail="project_id is required.")
+    return create_blender_scene(req.project_id, req)
+
+
+@app.post("/blender/render")
+def render_blender_scene_direct(req: BlenderRenderRequest, background_tasks: BackgroundTasks):
+    if not req.project_id:
+        raise HTTPException(status_code=422, detail="project_id is required.")
+    return render_blender_scene(req.project_id, req, background_tasks)
 
 
 @app.post("/project/{project_id}/departments/build")
