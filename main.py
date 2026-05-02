@@ -2479,12 +2479,30 @@ def render_blender_scene(project_id: str, req: BlenderRenderRequest, background_
     job = create_job(project_id, "blender_render", "RENDER_3D_AGENT", dump_model(req))
     if job.get("status") == "waiting_for_user":
         return {"ok": True, "job": job, "worker": blender_worker_status(), "message": "Blender render waiting for required approval gates."}
-    if req.run_now:
+    worker = blender_worker_status()
+    scene_payload = blender_scene_payload(project_id, req.concept_index or 0, req.width, req.height, req.scene, req.render)
+    saved_scene = save_blender_scene(project_id, scene_payload)
+    if req.run_now and worker.get("configured"):
         execute_job(job["id"])
         job = JOB_STORE[job["id"]]
     else:
-        background_tasks.add_task(execute_job, job["id"])
-    return {"ok": True, "job": job, "worker": blender_worker_status()}
+        result = {
+            "scene": saved_scene,
+            "render_result": {
+                "ok": False,
+                "status": "scene_json_only" if not worker.get("configured") else "queued_for_external_worker",
+                "worker": worker,
+            },
+        }
+        update_job(
+            job["id"],
+            "completed" if not worker.get("configured") else "queued",
+            100 if not worker.get("configured") else 35,
+            result=result,
+            message="Blender scene JSON created. Set BLENDER_BIN to produce real PNG/GLB renders on the server.",
+        )
+        job = JOB_STORE[job["id"]]
+    return {"ok": True, "job": job, "scene": saved_scene, "worker": worker}
 
 
 @app.post("/blender/scene")
@@ -2498,7 +2516,13 @@ def create_blender_scene_direct(req: BlenderRenderRequest):
 def render_blender_scene_direct(req: BlenderRenderRequest, background_tasks: BackgroundTasks):
     if not req.project_id:
         raise HTTPException(status_code=422, detail="project_id is required.")
-    return render_blender_scene(req.project_id, req, background_tasks)
+    try:
+        return render_blender_scene(req.project_id, req, background_tasks)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR] Blender render direct failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Blender render failed: {exc}")
 
 
 @app.post("/project/{project_id}/departments/build")
