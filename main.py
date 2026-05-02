@@ -3,6 +3,8 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -31,11 +33,13 @@ RENDER_DOMAIN = os.getenv("RENDER_EXTERNAL_HOSTNAME", "localhost:8000")
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "media"))
 GENERATED_DIR = Path(os.getenv("GENERATED_DIR", "media/generated"))
 CAD_PRO_DIR = Path(os.getenv("CAD_PRO_DIR", "media/cad_pro"))
+BLENDER_SCRIPT_PATH = Path(os.getenv("BLENDER_SCRIPT_PATH", "blender_script.py"))
+BLENDER_OUTPUT_DIR = Path(os.getenv("BLENDER_OUTPUT_DIR", "media/blender"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "media/data"))
 PROJECT_DATA_DIR = DATA_DIR / "projects"
 ASSET_DATA_DIR = DATA_DIR / "assets"
 JOB_DATA_DIR = DATA_DIR / "jobs"
-for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR, DATA_DIR, PROJECT_DATA_DIR, ASSET_DATA_DIR, JOB_DATA_DIR]:
+for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR, BLENDER_OUTPUT_DIR, DATA_DIR, PROJECT_DATA_DIR, ASSET_DATA_DIR, JOB_DATA_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title=APP_NAME, version=API_VERSION)
@@ -166,6 +170,16 @@ class PresentationBuildRequest(BaseModel):
     context: Dict[str, Any] = {}
 
 
+class BlenderRenderRequest(BaseModel):
+    project_id: str
+    concept_index: Optional[int] = 0
+    width: int = 1280
+    height: int = 720
+    run_now: bool = False
+    scene: Dict[str, Any] = {}
+    render: Dict[str, Any] = {}
+
+
 class ResearchRunRequest(BaseModel):
     project_id: Optional[str] = None
     brief: Optional[str] = None
@@ -242,6 +256,7 @@ JOB_KIND_AGENT = {
     "moodboard": "MOODBOARD_AGENT",
     "2d_graphics": "GRAPHICS_2D_AGENT",
     "3d_renders": "RENDER_3D_AGENT",
+    "blender_render": "RENDER_3D_AGENT",
     "departments": "SHOW_RUNNER_AGENT",
     "presentation": "PRESENTATION_AGENT",
     "cad_layout": "CAD_AGENT",
@@ -253,6 +268,7 @@ JOB_GATE_REQUIREMENTS = {
     "moodboard": ["brief_approved", "concept_approved"],
     "2d_graphics": ["brief_approved", "concept_approved", "moodboard_approved"],
     "3d_renders": ["brief_approved", "concept_approved"],
+    "blender_render": ["brief_approved", "concept_approved"],
     "departments": ["brief_approved", "concept_approved"],
     "presentation": ["brief_approved", "concept_approved"],
     "cad_layout": [],
@@ -1234,6 +1250,97 @@ def build_3d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, A
     return assets
 
 
+def blender_binary() -> Optional[str]:
+    configured = os.getenv("BLENDER_BIN", "").strip()
+    if configured and Path(configured).exists():
+        return configured
+    return shutil.which(configured or "blender")
+
+
+def blender_worker_status() -> Dict[str, Any]:
+    bin_path = blender_binary()
+    return {
+        "configured": bool(bin_path),
+        "blender_bin": bin_path,
+        "script_exists": BLENDER_SCRIPT_PATH.exists(),
+        "script_path": str(BLENDER_SCRIPT_PATH),
+        "output_dir": str(BLENDER_OUTPUT_DIR),
+        "mode": "local_subprocess" if bin_path and BLENDER_SCRIPT_PATH.exists() else "scene_json_only",
+        "note": "Set BLENDER_BIN to enable server-side Blender rendering." if not bin_path else "Blender worker is available.",
+    }
+
+
+def blender_scene_payload(project_id: str, concept_index: int = 0, width: int = 1280, height: int = 720, scene_override: Optional[Dict[str, Any]] = None, render_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    project = load_project(project_id) or {}
+    concept = selected_concept(project_id, concept_index)
+    title = concept.get("name") or project.get("project_name") or "BriefCraftAI Scene"
+    style = (concept.get("style") or project.get("style_direction") or "futuristic").lower()
+    brand = project.get("brand") or "Brand"
+    colors = {
+        "primary": "#1A5DFF" if "bmw" in brand.lower() else "#C9A84C",
+        "secondary": "#A855F7" if "futur" in style or "cinematic" in style else "#E8C97A",
+    }
+    guest_count = extract_guest_count(project.get("brief") or "") or 300
+    rows = max(4, min(14, int(math.sqrt(guest_count / 1.6))))
+    cols = max(8, min(24, int(guest_count / max(rows, 1))))
+    scene = {
+        "title": title,
+        "brand": brand,
+        "concept": concept,
+        "stage": {"width": 60, "depth": 24, "height": 4},
+        "led_wall": {"type": "wide", "width": 42, "height": 13},
+        "audience": {"rows": rows, "cols": cols},
+        "colors": colors,
+        "lighting": {"style": "futuristic" if "futur" in style or "cinematic" in style else "premium"},
+        "camera_target": [0, 0, 6],
+    }
+    if scene_override:
+        scene.update(scene_override)
+    output_rel = f"blender/{project_id}/{uuid.uuid4().hex[:8]}"
+    output_dir = MEDIA_DIR / output_rel
+    render = {"output_dir": str(output_dir), "width": int(width or 1280), "height": int(height or 720)}
+    if render_override:
+        render.update(render_override)
+    return {"scene": scene, "render": render}
+
+
+def save_blender_scene(project_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    scene_id = str(uuid.uuid4())
+    scene_dir = BLENDER_OUTPUT_DIR / project_id
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    scene_path = scene_dir / f"{scene_id}.json"
+    scene_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    url = public_url(f"media/blender/{project_id}/{scene_path.name}")
+    return {"scene_id": scene_id, "scene_path": str(scene_path), "scene_url": url, "payload": payload}
+
+
+def run_blender_scene(scene_path: str, timeout_seconds: int = 1800) -> Dict[str, Any]:
+    status = blender_worker_status()
+    if not status["configured"] or not status["script_exists"]:
+        return {"ok": False, "status": "worker_not_configured", **status}
+    cmd = [status["blender_bin"], "-b", "-P", str(BLENDER_SCRIPT_PATH), "--", scene_path]
+    started = now_ts()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+        manifest_path = Path(json.loads(Path(scene_path).read_text(encoding="utf-8"))["render"]["output_dir"]) / "manifest.json"
+        manifest = read_json_file(manifest_path, {}) if manifest_path.exists() else {}
+        return {
+            "ok": proc.returncode == 0,
+            "status": "completed" if proc.returncode == 0 else "failed",
+            "returncode": proc.returncode,
+            "started_at": started,
+            "completed_at": now_ts(),
+            "stdout": proc.stdout[-4000:],
+            "stderr": proc.stderr[-4000:],
+            "manifest_path": str(manifest_path),
+            "manifest": manifest,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {"ok": False, "status": "timeout", "error": str(exc), "started_at": started, "completed_at": now_ts()}
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc), "started_at": started, "completed_at": now_ts()}
+
+
 def build_pdf_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, Any]]:
     concept = selected_concept(project_id, concept_index)
     drawings = [
@@ -1677,6 +1784,19 @@ def execute_job(job_id: str) -> None:
             update_job(job_id, "running", 42, message="Building 3D scenes from selected concept and available CAD/venue intelligence.")
             result = {"assets": build_3d_assets(project_id, payload.get("concept_index", 0))}
             add_handoff(project, "RENDER_3D_AGENT", "CAD_AGENT", "3D approved structures need top/right/left/front production drawings.", {"asset_count": len(result["assets"])})
+        elif kind == "blender_render":
+            update_job(job_id, "running", 35, message="Preparing Blender scene JSON for realistic 3D rendering.")
+            scene = blender_scene_payload(
+                project_id,
+                payload.get("concept_index", 0),
+                payload.get("width", 1280),
+                payload.get("height", 720),
+                payload.get("scene"),
+                payload.get("render"),
+            )
+            saved_scene = save_blender_scene(project_id, scene)
+            render_result = run_blender_scene(saved_scene["scene_path"]) if payload.get("run_now") else {"ok": False, "status": "queued_for_external_worker", "worker": blender_worker_status()}
+            result = {"scene": saved_scene, "render_result": render_result}
         elif kind == "departments":
             update_job(job_id, "running", 45, message="Building cross-department AV, sound, lighting, show runner and PDF output.")
             result = department_outputs(project_id, payload.get("concept_index", 0))
@@ -1739,6 +1859,8 @@ def studio_frontend_contract():
             "file_intelligence": True,
             "agent_handoffs": True,
             "admin_status": True,
+            "blender_scene_generation": True,
+            "blender_worker": bool(blender_binary()),
         },
         "endpoints": {
             "agents": "/agents",
@@ -1760,6 +1882,9 @@ def studio_frontend_contract():
             "moodboard_get": "/api/projects/{project_id}/moodboard",
             "graphics_2d": "/ai/generate-2d",
             "renders_3d": "/projects/{project_id}/renders/generate-separated",
+            "blender_health": "/blender/health",
+            "blender_scene": "/projects/{project_id}/blender/scene",
+            "blender_render": "/projects/{project_id}/blender/render",
             "departments": "/project/{project_id}/departments/build",
             "pdfs": "/projects/{project_id}/pdfs",
             "presentation": "/projects/{project_id}/presentation/build",
@@ -1906,11 +2031,24 @@ create table if not exists public.bc_file_intelligence (
   created_at timestamptz default now()
 );
 
+create table if not exists public.bc_blender_renders (
+  id text primary key,
+  project_id text,
+  job_id text,
+  status text,
+  scene_url text,
+  manifest_url text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
 create index if not exists bc_assets_project_idx on public.bc_assets(project_id);
 create index if not exists bc_jobs_project_idx on public.bc_jobs(project_id);
 create index if not exists bc_research_project_idx on public.bc_research(project_id);
 create index if not exists bc_handoffs_project_idx on public.bc_handoffs(project_id);
 create index if not exists bc_file_intelligence_project_idx on public.bc_file_intelligence(project_id);
+create index if not exists bc_blender_renders_project_idx on public.bc_blender_renders(project_id);
 
 alter table public.bc_projects enable row level security;
 alter table public.bc_assets enable row level security;
@@ -1920,6 +2058,7 @@ alter table public.bc_credit_ledger enable row level security;
 alter table public.bc_credit_accounts enable row level security;
 alter table public.bc_handoffs enable row level security;
 alter table public.bc_file_intelligence enable row level security;
+alter table public.bc_blender_renders enable row level security;
 
 create or replace function public.bc_consume_credits(
   p_user_key text,
@@ -2272,10 +2411,42 @@ def generate_3d(project_id: str, request: Request, x_user_id: Optional[str] = He
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["RENDER_3D_AGENT"]["credit_cost"], "3D render generation", "RENDER_3D_AGENT", project_id, f"/projects/{project_id}/renders/generate-separated")
     idx = project.get("selected_concept_index") or 0
     assets = build_3d_assets(project_id, idx)
+    scene = save_blender_scene(project_id, blender_scene_payload(project_id, idx, 1280, 720))
     job = {"id": str(uuid.uuid4()), "project_id": project_id, "job_kind": "3d_renders", "agent_id": "RENDER_3D_AGENT", "section": "renders", "status": "completed", "progress": 100, "created_at": now_ts(), "updated_at": now_ts()}
     PROJECT_JOBS.setdefault(project_id, []).append(job)
     persist_job(job)
-    return {"ok": True, "project_id": project_id, "assets": assets, "account": acct}
+    return {"ok": True, "project_id": project_id, "assets": assets, "blender_scene": scene, "blender_worker": blender_worker_status(), "account": acct}
+
+
+@app.get("/blender/health")
+def blender_health():
+    return {"ok": True, **blender_worker_status()}
+
+
+@app.post("/projects/{project_id}/blender/scene")
+def create_blender_scene(project_id: str, req: BlenderRenderRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    payload = blender_scene_payload(project_id, req.concept_index or 0, req.width, req.height, req.scene, req.render)
+    saved = save_blender_scene(project_id, payload)
+    return {"ok": True, "project_id": project_id, "scene": saved, "worker": blender_worker_status()}
+
+
+@app.post("/projects/{project_id}/blender/render")
+def render_blender_scene(project_id: str, req: BlenderRenderRequest, background_tasks: BackgroundTasks):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    job = create_job(project_id, "blender_render", "RENDER_3D_AGENT", dump_model(req))
+    if job.get("status") == "waiting_for_user":
+        return {"ok": True, "job": job, "worker": blender_worker_status(), "message": "Blender render waiting for required approval gates."}
+    if req.run_now:
+        execute_job(job["id"])
+        job = JOB_STORE[job["id"]]
+    else:
+        background_tasks.add_task(execute_job, job["id"])
+    return {"ok": True, "job": job, "worker": blender_worker_status()}
 
 
 @app.post("/project/{project_id}/departments/build")
@@ -2332,7 +2503,10 @@ def admin_status():
             "agent_handoffs": True,
             "job_steps": True,
             "supabase_persistence": bool(get_supabase()),
+            "blender_scene_generation": True,
+            "blender_worker": bool(blender_binary()),
         },
+        "blender": blender_worker_status(),
     }
 
 
