@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,11 +37,12 @@ GENERATED_DIR = Path(os.getenv("GENERATED_DIR", "media/generated"))
 CAD_PRO_DIR = Path(os.getenv("CAD_PRO_DIR", "media/cad_pro"))
 BLENDER_SCRIPT_PATH = Path(os.getenv("BLENDER_SCRIPT_PATH", "blender_script.py"))
 BLENDER_OUTPUT_DIR = Path(os.getenv("BLENDER_OUTPUT_DIR", "media/blender"))
+EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "media/exports"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "media/data"))
 PROJECT_DATA_DIR = DATA_DIR / "projects"
 ASSET_DATA_DIR = DATA_DIR / "assets"
 JOB_DATA_DIR = DATA_DIR / "jobs"
-for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR, BLENDER_OUTPUT_DIR, DATA_DIR, PROJECT_DATA_DIR, ASSET_DATA_DIR, JOB_DATA_DIR]:
+for folder in [MEDIA_DIR, GENERATED_DIR, CAD_PRO_DIR, BLENDER_OUTPUT_DIR, EXPORT_DIR, DATA_DIR, PROJECT_DATA_DIR, ASSET_DATA_DIR, JOB_DATA_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title=APP_NAME, version=API_VERSION)
@@ -232,6 +234,59 @@ class HandoffRequest(BaseModel):
     payload: Dict[str, Any] = {}
 
 
+class BrandKitRequest(BaseModel):
+    brand_name: Optional[str] = None
+    logo_url: Optional[str] = None
+    colors: List[str] = []
+    fonts: List[str] = []
+    tone: Optional[str] = None
+    mandatory_copy: List[str] = []
+    sponsor_hierarchy: List[str] = []
+    reference_urls: List[str] = []
+    guidelines: Optional[str] = None
+
+
+class VenueKitRequest(BaseModel):
+    venue_name: Optional[str] = None
+    address: Optional[str] = None
+    width: Optional[float] = None
+    depth: Optional[float] = None
+    height: Optional[float] = None
+    unit: Optional[str] = "m"
+    capacity: Optional[int] = None
+    ceiling_height: Optional[str] = None
+    rigging_notes: Optional[str] = None
+    power_notes: Optional[str] = None
+    entry_points: List[str] = []
+    exit_points: List[str] = []
+    reference_urls: List[str] = []
+    notes: Optional[str] = None
+
+
+class BudgetEstimateRequest(BaseModel):
+    project_id: str
+    concept_index: Optional[int] = 0
+    currency: Optional[str] = "INR"
+    budget_range: Optional[str] = None
+    assumptions: Dict[str, Any] = {}
+
+
+class RevisionCreateRequest(BaseModel):
+    target_type: str
+    target_id: Optional[str] = None
+    title: Optional[str] = None
+    note: Optional[str] = None
+    data: Dict[str, Any] = {}
+    created_by: Optional[str] = None
+
+
+class ShareCreateRequest(BaseModel):
+    title: Optional[str] = None
+    sections: List[str] = []
+    expires_in_days: Optional[int] = 14
+    require_approval: bool = True
+
+
 # =============================================================================
 # IN-MEMORY STORES
 # =============================================================================
@@ -241,10 +296,17 @@ PROJECT_ASSETS: Dict[str, List[Dict[str, Any]]] = {}
 PROJECT_JOBS: Dict[str, List[Dict[str, Any]]] = {}
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
 RESEARCH_STORE: Dict[str, List[Dict[str, Any]]] = {}
+PROJECT_REVISIONS: Dict[str, List[Dict[str, Any]]] = {}
+PROJECT_SHARES: Dict[str, Dict[str, Any]] = {}
 ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 _SUPABASE_CLIENT = None
+
+AI_MODE = os.getenv("AI_MODE", "mock").strip().lower()
+OPENAI_ENABLED = os.getenv("OPENAI_ENABLED", "false").strip().lower() == "true"
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
 APPROVAL_GATES = [
     "brief_approved",
@@ -408,6 +470,21 @@ CONCEPT_ARCHETYPES = [
 
 def now_ts() -> float:
     return time.time()
+
+
+def openai_ready() -> bool:
+    return OPENAI_ENABLED and AI_MODE == "openai" and bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def provider_status() -> Dict[str, Any]:
+    return {
+        "ai_mode": AI_MODE,
+        "openai_enabled": OPENAI_ENABLED,
+        "openai_ready": openai_ready(),
+        "text_model": OPENAI_TEXT_MODEL if openai_ready() else None,
+        "image_model": OPENAI_IMAGE_MODEL if openai_ready() else None,
+        "mock_outputs": not openai_ready(),
+    }
 
 
 def get_supabase():
@@ -625,6 +702,33 @@ def persist_file_intelligence(item: Dict[str, Any], project_id: Optional[str] = 
     })
 
 
+def persist_revision(item: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_revisions", {
+        "id": item.get("id"),
+        "project_id": item.get("project_id"),
+        "target_type": item.get("target_type"),
+        "target_id": item.get("target_id"),
+        "version": item.get("version"),
+        "title": item.get("title"),
+        "note": item.get("note"),
+        "data": item,
+        "created_at": item.get("created_at") or now_ts(),
+    })
+
+
+def persist_share(item: Dict[str, Any]) -> None:
+    sb_table_upsert("bc_share_links", {
+        "id": item.get("id"),
+        "project_id": item.get("project_id"),
+        "token": item.get("token"),
+        "title": item.get("title"),
+        "sections": item.get("sections"),
+        "expires_at": item.get("expires_at"),
+        "data": item,
+        "created_at": item.get("created_at") or now_ts(),
+    })
+
+
 def load_project(project_id: str) -> Optional[Dict[str, Any]]:
     project = PROJECT_STORE.get(project_id)
     if project:
@@ -669,6 +773,25 @@ def default_project_memory(project: Optional[Dict[str, Any]] = None) -> Dict[str
 
 def ensure_project_runtime(project: Dict[str, Any]) -> Dict[str, Any]:
     project.setdefault("memory", default_project_memory(project))
+    project.setdefault("brand_kit", {
+        "brand_name": project.get("brand") or "Brand to be confirmed",
+        "colors": [],
+        "fonts": [],
+        "tone": project.get("style_direction") or "premium creative",
+        "mandatory_copy": [],
+        "sponsor_hierarchy": [],
+        "reference_urls": [],
+    })
+    project.setdefault("venue_kit", {
+        "venue_name": project.get("venue") or "Venue to be confirmed",
+        "unit": "m",
+        "entry_points": [],
+        "exit_points": [],
+        "reference_urls": [],
+    })
+    project.setdefault("budget_estimate", None)
+    project.setdefault("revisions", [])
+    project.setdefault("share_links", [])
     approvals = project.setdefault("approval_gates", {})
     for gate in APPROVAL_GATES:
         approvals.setdefault(gate, {"approved": False, "note": None, "updated_at": None, "approved_by": None})
@@ -1340,15 +1463,17 @@ def file_public_url(path_value: Any) -> Optional[str]:
     path_text = str(path_value).replace("\\", "/")
     if path_text.startswith("http://") or path_text.startswith("https://"):
         return path_text
-    if "/media/" in path_text:
-        return public_url("media/" + path_text.split("/media/", 1)[1])
+    marker = "/media/"
+    if marker in path_text:
+        return public_url("media/" + path_text.split(marker, 1)[1])
+    media_root = str(MEDIA_DIR.resolve()).replace("\\", "/")
     try:
         resolved = str(Path(path_text).resolve()).replace("\\", "/")
-        media_root = str(MEDIA_DIR.resolve()).replace("\\", "/")
-        if resolved.startswith(media_root):
-            return public_url("media/" + resolved[len(media_root):].lstrip("/"))
     except Exception:
-        pass
+        resolved = path_text
+    if resolved.startswith(media_root):
+        rel = resolved[len(media_root):].lstrip("/")
+        return public_url(f"media/{rel}")
     if path_text.startswith("media/"):
         return public_url(path_text)
     return None
@@ -1446,6 +1571,126 @@ def presentation_deck(project_id: str, concept_index: int = 0) -> Dict[str, Any]
         ],
         "presenter_note": "Speak like a senior creative presenter: clear, persuasive and connected to the client objective.",
     }
+
+
+def estimate_project_budget(project_id: str, concept_index: int = 0, currency: str = "INR", budget_range: Optional[str] = None, assumptions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    project = load_project(project_id) or {}
+    concept = selected_concept(project_id, concept_index)
+    brief = project.get("brief") or ""
+    guest_text = extract_guest_count(brief) or ""
+    guest_match = re.search(r"\d+", guest_text)
+    guests = int(guest_match.group(0)) if guest_match else 300
+    multiplier = 1.25 if "luxury" in (project.get("style_direction") or "").lower() else 1.0
+    line_items = [
+        ("Stage / scenic fabrication", max(250000, guests * 1450 * multiplier)),
+        ("LED / projection / playback", max(180000, guests * 900 * multiplier)),
+        ("Lighting fixtures and control", max(120000, guests * 550 * multiplier)),
+        ("Sound, microphones and show audio", max(90000, guests * 350 * multiplier)),
+        ("2D print, wayfinding and brand graphics", max(85000, guests * 300 * multiplier)),
+        ("Furniture, registration and hospitality zones", max(100000, guests * 420 * multiplier)),
+        ("CAD, production drawings and site coordination", max(75000, guests * 180 * multiplier)),
+        ("Crew, show caller and technical rehearsal", max(125000, guests * 320 * multiplier)),
+    ]
+    subtotal = int(sum(v for _, v in line_items))
+    contingency = int(subtotal * 0.12)
+    total = subtotal + contingency
+    estimate = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "concept_index": concept_index,
+        "concept_name": concept.get("name"),
+        "currency": currency or "INR",
+        "budget_range": budget_range or project.get("budget_range") or extract_budget(brief),
+        "guest_count_assumption": guests,
+        "line_items": [{"name": name, "amount": int(amount)} for name, amount in line_items],
+        "subtotal": subtotal,
+        "contingency_percent": 12,
+        "contingency": contingency,
+        "total": total,
+        "assumptions": {
+            "mode": "mock_estimate",
+            "note": "Planning estimate only; vendor quotes and final venue specs should replace these assumptions.",
+            **(assumptions or {}),
+        },
+        "created_at": now_ts(),
+    }
+    return estimate
+
+
+def create_revision(project: Dict[str, Any], req: RevisionCreateRequest) -> Dict[str, Any]:
+    ensure_project_runtime(project)
+    project_id = project.get("project_id") or project.get("id")
+    revisions = PROJECT_REVISIONS.setdefault(project_id, project.get("revisions", []))
+    target_revs = [r for r in revisions if r.get("target_type") == req.target_type and r.get("target_id") == req.target_id]
+    revision = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "target_type": req.target_type,
+        "target_id": req.target_id,
+        "version": len(target_revs) + 1,
+        "title": req.title or f"{req.target_type} v{len(target_revs) + 1}",
+        "note": req.note,
+        "data": req.data,
+        "created_by": req.created_by,
+        "created_at": now_ts(),
+    }
+    revisions.append(revision)
+    project["revisions"] = revisions
+    project["updated_at"] = now_ts()
+    persist_revision(revision)
+    persist_project(project)
+    return revision
+
+
+def build_pdf_export(project_id: str, deck: Dict[str, Any]) -> str:
+    out_dir = EXPORT_DIR / project_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{project_id}_pitch.pdf"
+    try:
+        from reportlab.lib.pagesizes import landscape, A4
+        from reportlab.pdfgen import canvas
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"reportlab is required for PDF export: {exc}")
+    c = canvas.Canvas(str(path), pagesize=landscape(A4))
+    width, height = landscape(A4)
+    for slide in deck.get("slides", []):
+        c.setFillColorRGB(0.04, 0.05, 0.08)
+        c.rect(0, 0, width, height, fill=1, stroke=0)
+        c.setFillColorRGB(0.92, 0.76, 0.38)
+        c.setFont("Helvetica-Bold", 24)
+        c.drawString(42, height - 58, str(slide.get("title", "Slide"))[:86])
+        c.setFillColorRGB(1, 1, 1)
+        c.setFont("Helvetica", 12)
+        text = c.beginText(48, height - 105)
+        body = re.sub(r"\s+", " ", str(slide.get("body", "")))
+        for i in range(0, min(len(body), 1400), 92):
+            text.textLine(body[i:i + 92])
+        c.drawText(text)
+        c.showPage()
+    c.save()
+    return public_url(f"media/exports/{project_id}/{path.name}")
+
+
+def build_pptx_export(project_id: str, deck: Dict[str, Any]) -> str:
+    out_dir = EXPORT_DIR / project_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{project_id}_pitch.pptx"
+    slides = deck.get("slides", []) or [{"title": deck.get("title", "Pitch"), "body": ""}]
+
+    def slide_xml(slide: Dict[str, Any]) -> str:
+        title = xml_escape(slide.get("title", "Slide"))
+        body = xml_escape(re.sub(r"\s+", " ", str(slide.get("body", "")))[:1800])
+        return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="548640" y="420000"/><a:ext cx="11200000" cy="760000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="3000" b="1"/><a:t>{title}</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="685800" y="1500000"/><a:ext cx="10600000" cy="4300000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="1600"/><a:t>{body}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'''
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' + "".join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, len(slides) + 1)) + '</Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
+        z.writestr("ppt/presentation.xml", '<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>' + "".join(f'<p:sldId id="{255+i}" r:id="rId{i}"/>' for i in range(1, len(slides) + 1)) + '</p:sldIdLst><p:sldSz cx="12192000" cy="6858000" type="wide"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>')
+        z.writestr("ppt/_rels/presentation.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i}.xml"/>' for i in range(1, len(slides) + 1)) + '</Relationships>')
+        for i, slide in enumerate(slides, 1):
+            z.writestr(f"ppt/slides/slide{i}.xml", slide_xml(slide))
+    return public_url(f"media/exports/{project_id}/{path.name}")
 
 
 # =============================================================================
@@ -1919,7 +2164,16 @@ def studio_frontend_contract():
             "admin_status": True,
             "blender_scene_generation": True,
             "blender_worker": bool(blender_binary()),
+            "ai_provider_switch": True,
+            "brand_kit": True,
+            "venue_kit": True,
+            "budget_estimator": True,
+            "revision_history": True,
+            "client_share_links": True,
+            "pptx_export": True,
+            "pdf_export": True,
         },
+        "providers": provider_status(),
         "endpoints": {
             "agents": "/agents",
             "account_bootstrap": "/account/bootstrap",
@@ -1929,6 +2183,12 @@ def studio_frontend_contract():
             "jobs_create": "/jobs",
             "jobs_get": "/jobs/{job_id}",
             "project_memory": "/projects/{project_id}/memory",
+            "brand_kit": "/projects/{project_id}/brand-kit",
+            "venue_kit": "/projects/{project_id}/venue-kit",
+            "budget_estimate": "/projects/{project_id}/budget/estimate",
+            "revisions": "/projects/{project_id}/revisions",
+            "share_links": "/projects/{project_id}/share-links",
+            "share_public": "/share/{token}",
             "approval_gates": "/projects/{project_id}/approval-gates",
             "workflow": "/projects/{project_id}/workflow",
             "handoffs": "/projects/{project_id}/handoffs",
@@ -1948,6 +2208,7 @@ def studio_frontend_contract():
             "departments": "/project/{project_id}/departments/build",
             "pdfs": "/projects/{project_id}/pdfs",
             "presentation": "/projects/{project_id}/presentation/build",
+            "presentation_export": "/projects/{project_id}/presentation/export",
             "cad": "/api/cad/pro/generate",
             "ucd_chat": "/ucd/chat",
             "admin_status": "/admin/status",
@@ -2103,12 +2364,61 @@ create table if not exists public.bc_blender_renders (
   updated_at timestamptz default now()
 );
 
+create table if not exists public.bc_brand_kits (
+  project_id text primary key,
+  brand_name text,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz default now()
+);
+
+create table if not exists public.bc_venue_kits (
+  project_id text primary key,
+  venue_name text,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz default now()
+);
+
+create table if not exists public.bc_budget_estimates (
+  id text primary key,
+  project_id text,
+  currency text,
+  total numeric,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_revisions (
+  id text primary key,
+  project_id text,
+  target_type text,
+  target_id text,
+  version int,
+  title text,
+  note text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.bc_share_links (
+  id text primary key,
+  project_id text,
+  token text unique,
+  title text,
+  sections jsonb not null default '[]'::jsonb,
+  expires_at double precision,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
 create index if not exists bc_assets_project_idx on public.bc_assets(project_id);
 create index if not exists bc_jobs_project_idx on public.bc_jobs(project_id);
 create index if not exists bc_research_project_idx on public.bc_research(project_id);
 create index if not exists bc_handoffs_project_idx on public.bc_handoffs(project_id);
 create index if not exists bc_file_intelligence_project_idx on public.bc_file_intelligence(project_id);
 create index if not exists bc_blender_renders_project_idx on public.bc_blender_renders(project_id);
+create index if not exists bc_budget_estimates_project_idx on public.bc_budget_estimates(project_id);
+create index if not exists bc_revisions_project_idx on public.bc_revisions(project_id);
+create index if not exists bc_share_links_project_idx on public.bc_share_links(project_id);
 
 alter table public.bc_projects enable row level security;
 alter table public.bc_assets enable row level security;
@@ -2119,6 +2429,11 @@ alter table public.bc_credit_accounts enable row level security;
 alter table public.bc_handoffs enable row level security;
 alter table public.bc_file_intelligence enable row level security;
 alter table public.bc_blender_renders enable row level security;
+alter table public.bc_brand_kits enable row level security;
+alter table public.bc_venue_kits enable row level security;
+alter table public.bc_budget_estimates enable row level security;
+alter table public.bc_revisions enable row level security;
+alter table public.bc_share_links enable row level security;
 
 create or replace function public.bc_consume_credits(
   p_user_key text,
@@ -2254,6 +2569,147 @@ def update_project_memory(project_id: str, req: ProjectMemoryRequest):
         raise HTTPException(status_code=404, detail="Project not found.")
     memory = merge_project_memory(project, dump_model(req))
     return {"ok": True, "project_id": project_id, "memory": memory, "workflow_state": workflow_recommendation(project)}
+
+
+@app.get("/projects/{project_id}/brand-kit")
+def get_project_brand_kit(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "brand_kit": project.get("brand_kit")}
+
+
+@app.post("/projects/{project_id}/brand-kit")
+def update_project_brand_kit(project_id: str, req: BrandKitRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    kit = project.get("brand_kit", {})
+    update = dump_model(req)
+    for key, value in update.items():
+        if value not in (None, "", []):
+            kit[key] = value
+    if kit.get("brand_name"):
+        project["brand"] = kit["brand_name"]
+    if kit.get("tone"):
+        project["style_direction"] = kit["tone"]
+    kit["updated_at"] = now_ts()
+    project["brand_kit"] = kit
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    sb_table_upsert("bc_brand_kits", {"project_id": project_id, "brand_name": kit.get("brand_name"), "data": kit, "updated_at": now_ts()})
+    return {"ok": True, "project_id": project_id, "brand_kit": kit}
+
+
+@app.get("/projects/{project_id}/venue-kit")
+def get_project_venue_kit(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "venue_kit": project.get("venue_kit")}
+
+
+@app.post("/projects/{project_id}/venue-kit")
+def update_project_venue_kit(project_id: str, req: VenueKitRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    kit = project.get("venue_kit", {})
+    update = dump_model(req)
+    for key, value in update.items():
+        if value not in (None, "", []):
+            kit[key] = value
+    if kit.get("venue_name"):
+        project["venue"] = kit["venue_name"]
+    kit["updated_at"] = now_ts()
+    project["venue_kit"] = kit
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    sb_table_upsert("bc_venue_kits", {"project_id": project_id, "venue_name": kit.get("venue_name"), "data": kit, "updated_at": now_ts()})
+    return {"ok": True, "project_id": project_id, "venue_kit": kit}
+
+
+@app.post("/projects/{project_id}/budget/estimate")
+def create_project_budget_estimate(project_id: str, req: BudgetEstimateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    estimate = estimate_project_budget(project_id, req.concept_index or 0, req.currency or "INR", req.budget_range, req.assumptions)
+    project["budget_estimate"] = estimate
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    sb_table_upsert("bc_budget_estimates", {"id": estimate["id"], "project_id": project_id, "currency": estimate["currency"], "total": estimate["total"], "data": estimate, "created_at": estimate["created_at"]})
+    return {"ok": True, "project_id": project_id, "budget_estimate": estimate}
+
+
+@app.get("/projects/{project_id}/revisions")
+def list_project_revisions(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    revisions = PROJECT_REVISIONS.setdefault(project_id, project.get("revisions", []))
+    return {"ok": True, "project_id": project_id, "revisions": revisions}
+
+
+@app.post("/projects/{project_id}/revisions")
+def create_project_revision(project_id: str, req: RevisionCreateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    revision = create_revision(project, req)
+    return {"ok": True, "project_id": project_id, "revision": revision, "revisions": project.get("revisions", [])}
+
+
+@app.post("/projects/{project_id}/share-links")
+def create_project_share_link(project_id: str, req: ShareCreateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    token = uuid.uuid4().hex
+    share = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "token": token,
+        "title": req.title or f"Client Review - {project.get('project_name') or project.get('title')}",
+        "sections": req.sections or ["brief", "concepts", "moodboard", "renders", "pdfs", "presentation"],
+        "expires_at": now_ts() + max(1, int(req.expires_in_days or 14)) * 86400,
+        "require_approval": req.require_approval,
+        "created_at": now_ts(),
+    }
+    PROJECT_SHARES[token] = share
+    project.setdefault("share_links", []).append(share)
+    project["updated_at"] = now_ts()
+    persist_share(share)
+    persist_project(project)
+    share["url"] = f"/share/{token}"
+    return {"ok": True, "project_id": project_id, "share": share}
+
+
+@app.get("/share/{token}")
+def get_public_share(token: str):
+    share = PROJECT_SHARES.get(token) or sb_table_select_one("bc_share_links", "token", token)
+    if not share:
+        raise HTTPException(status_code=404, detail="Share link not found.")
+    share_data = share.get("data") if isinstance(share.get("data"), dict) else share
+    if share_data.get("expires_at") and now_ts() > float(share_data["expires_at"]):
+        raise HTTPException(status_code=410, detail="Share link expired.")
+    project_id = share_data.get("project_id")
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    sections = set(share_data.get("sections") or [])
+    payload = {"project_id": project_id, "title": share_data.get("title"), "project": project}
+    if "moodboard" in sections or "renders" in sections or "pdfs" in sections:
+        payload["assets"] = load_project_assets(project_id)
+    if "presentation" in sections:
+        payload["presentation"] = project.get("presentation")
+    return {"ok": True, "share": share_data, **payload}
 
 
 @app.get("/projects/{project_id}/approval-gates")
@@ -2659,10 +3115,35 @@ def build_presentation(project_id: str, req: PresentationBuildRequest, request: 
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id, f"/projects/{project_id}/presentation/build")
     deck = presentation_deck(project_id, req.concept_index or project.get("selected_concept_index") or 0)
+    deck["exports"] = {
+        "pptx_url": build_pptx_export(project_id, deck),
+        "pdf_url": build_pdf_export(project_id, deck),
+        "provider": "local_export",
+    }
     project["presentation"] = deck
     project["updated_at"] = now_ts()
     persist_project(project)
     return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
+
+
+@app.post("/projects/{project_id}/presentation/export")
+def export_presentation(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    deck = project.get("presentation") or presentation_deck(project_id, project.get("selected_concept_index") or 0)
+    exports = {
+        "pptx_url": build_pptx_export(project_id, deck),
+        "pdf_url": build_pdf_export(project_id, deck),
+        "provider": "local_export",
+    }
+    deck["exports"] = exports
+    project["presentation"] = deck
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    store_asset(project_id, "presentation", "pptx", "Client Pitch PPTX", "Editable client pitch presentation.", exports["pptx_url"], {"source": "presentation_export"})
+    store_asset(project_id, "presentation", "pdf", "Client Pitch PDF", "Client-ready PDF pitch presentation.", exports["pdf_url"], {"source": "presentation_export"})
+    return {"ok": True, "project_id": project_id, "presentation": deck, "exports": exports}
 
 
 @app.get("/admin/status")
@@ -2692,7 +3173,15 @@ def admin_status():
             "supabase_persistence": bool(get_supabase()),
             "blender_scene_generation": True,
             "blender_worker": bool(blender_binary()),
+            "brand_kit": True,
+            "venue_kit": True,
+            "budget_estimator": True,
+            "revision_history": True,
+            "client_share_links": True,
+            "pptx_export": True,
+            "pdf_export": True,
         },
+        "providers": provider_status(),
         "blender": blender_worker_status(),
     }
 
