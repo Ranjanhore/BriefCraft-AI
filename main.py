@@ -1334,6 +1334,40 @@ def save_blender_scene(project_id: str, payload: Dict[str, Any]) -> Dict[str, An
     return {"scene_id": scene_id, "scene_path": str(scene_path), "scene_url": url, "payload": payload}
 
 
+def file_public_url(path_value: Any) -> Optional[str]:
+    if not path_value:
+        return None
+    path_text = str(path_value).replace("\\", "/")
+    if path_text.startswith("http://") or path_text.startswith("https://"):
+        return path_text
+    if "/media/" in path_text:
+        return public_url("media/" + path_text.split("/media/", 1)[1])
+    try:
+        resolved = str(Path(path_text).resolve()).replace("\\", "/")
+        media_root = str(MEDIA_DIR.resolve()).replace("\\", "/")
+        if resolved.startswith(media_root):
+            return public_url("media/" + resolved[len(media_root):].lstrip("/"))
+    except Exception:
+        pass
+    if path_text.startswith("media/"):
+        return public_url(path_text)
+    return None
+
+
+def blender_public_outputs(project_id: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    renders = {}
+    for name, path_value in (manifest.get("renders") or {}).items():
+        url = file_public_url(path_value)
+        if url:
+            renders[name] = {"path": path_value, "url": url}
+            store_asset(project_id, "renders", "3d_render", f"Blender Render - {name.replace('_', ' ').title()}", f"Real Blender render view: {name}", url, {"source": "blender", "view": name})
+    glb_url = file_public_url(manifest.get("glb"))
+    manifest_url = file_public_url(manifest.get("manifest"))
+    if glb_url:
+        store_asset(project_id, "renders", "3d_model", "Blender GLB Scene", "Exported interactive GLB scene from Blender.", glb_url, {"source": "blender", "format": "glb"})
+    return {"renders": renders, "glb_url": glb_url, "manifest_url": manifest_url}
+
+
 def run_blender_scene(scene_path: str, timeout_seconds: int = 1800) -> Dict[str, Any]:
     status = blender_worker_status()
     if not status["configured"] or not status["script_exists"]:
@@ -1344,6 +1378,9 @@ def run_blender_scene(scene_path: str, timeout_seconds: int = 1800) -> Dict[str,
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
         manifest_path = Path(json.loads(Path(scene_path).read_text(encoding="utf-8"))["render"]["output_dir"]) / "manifest.json"
         manifest = read_json_file(manifest_path, {}) if manifest_path.exists() else {}
+        scene_data = read_json_file(Path(scene_path), {}) or {}
+        project_id = str(scene_data.get("scene", {}).get("project_id") or Path(scene_path).parent.name)
+        public_outputs = blender_public_outputs(project_id, manifest) if proc.returncode == 0 else {}
         return {
             "ok": proc.returncode == 0,
             "status": "completed" if proc.returncode == 0 else "failed",
@@ -1354,6 +1391,7 @@ def run_blender_scene(scene_path: str, timeout_seconds: int = 1800) -> Dict[str,
             "stderr": proc.stderr[-4000:],
             "manifest_path": str(manifest_path),
             "manifest": manifest,
+            "public_outputs": public_outputs,
         }
     except subprocess.TimeoutExpired as exc:
         return {"ok": False, "status": "timeout", "error": str(exc), "started_at": started, "completed_at": now_ts()}
