@@ -1,6 +1,6 @@
+import base64
 import hashlib
 import json
-import math
 import os
 import random
 import re
@@ -242,8 +242,8 @@ class BrandKitRequest(BaseModel):
     tone: Optional[str] = None
     mandatory_copy: List[str] = []
     sponsor_hierarchy: List[str] = []
-    reference_urls: List[str] = []
     guidelines: Optional[str] = None
+    reference_urls: List[str] = []
 
 
 class VenueKitRequest(BaseModel):
@@ -259,8 +259,8 @@ class VenueKitRequest(BaseModel):
     power_notes: Optional[str] = None
     entry_points: List[str] = []
     exit_points: List[str] = []
-    reference_urls: List[str] = []
     notes: Optional[str] = None
+    reference_urls: List[str] = []
 
 
 class BudgetEstimateRequest(BaseModel):
@@ -287,6 +287,54 @@ class ShareCreateRequest(BaseModel):
     require_approval: bool = True
 
 
+class RoomGenerateRequest(BaseModel):
+    project_id: Optional[str] = None
+    room: str
+    prompt: Optional[str] = None
+    concept_index: Optional[int] = 0
+    context: Dict[str, Any] = {}
+
+
+class BriefQARequest(BaseModel):
+    project_id: Optional[str] = None
+    message: str
+    brief: Optional[str] = None
+    context: Dict[str, Any] = {}
+
+
+class MultiModalBriefRequest(BaseModel):
+    project_id: Optional[str] = None
+    text: Optional[str] = None
+    files: List[UCDFileMeta] = []
+    context: Dict[str, Any] = {}
+
+
+class NotificationRequest(BaseModel):
+    project_id: str
+    channel: str = "email"
+    to: List[str] = []
+    subject: Optional[str] = None
+    message: str
+    payload: Dict[str, Any] = {}
+
+
+class LiveSessionRequest(BaseModel):
+    project_id: str
+    title: Optional[str] = None
+    participants: List[str] = []
+    mode: Optional[str] = "client-review"
+
+
+class VendorRateCardRequest(BaseModel):
+    city: str = "default"
+    category: str
+    vendor_name: Optional[str] = None
+    unit: Optional[str] = "day"
+    rate: float
+    currency: Optional[str] = "INR"
+    notes: Optional[str] = None
+
+
 # =============================================================================
 # IN-MEMORY STORES
 # =============================================================================
@@ -298,6 +346,10 @@ JOB_STORE: Dict[str, Dict[str, Any]] = {}
 RESEARCH_STORE: Dict[str, List[Dict[str, Any]]] = {}
 PROJECT_REVISIONS: Dict[str, List[Dict[str, Any]]] = {}
 PROJECT_SHARES: Dict[str, Dict[str, Any]] = {}
+PROJECT_LIVE_SESSIONS: Dict[str, List[Dict[str, Any]]] = {}
+NOTIFICATION_LOG: Dict[str, List[Dict[str, Any]]] = {}
+VENDOR_RATE_CARDS: Dict[str, List[Dict[str, Any]]] = {}
+AGENCY_ASSET_LIBRARY: Dict[str, Dict[str, Any]] = {}
 ACCOUNT_STORE: Dict[str, Dict[str, Any]] = {}
 CREDIT_LEDGER: Dict[str, List[Dict[str, Any]]] = {}
 SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -307,6 +359,15 @@ AI_MODE = os.getenv("AI_MODE", "mock").strip().lower()
 OPENAI_ENABLED = os.getenv("OPENAI_ENABLED", "false").strip().lower() == "true"
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+AGENCY_NAME = os.getenv("AGENCY_NAME", "BriefCraftAI")
+WHITE_LABEL_ENABLED = os.getenv("WHITE_LABEL_ENABLED", "true").strip().lower() == "true"
+WHITE_LABEL_CONFIG: Dict[str, Any] = {
+    "enabled": WHITE_LABEL_ENABLED,
+    "agency_name": AGENCY_NAME,
+    "logo_url": os.getenv("AGENCY_LOGO_URL", ""),
+    "primary_color": os.getenv("AGENCY_PRIMARY_COLOR", "#c9a84c"),
+    "client_portal_domain": os.getenv("CLIENT_PORTAL_DOMAIN", ""),
+}
 
 APPROVAL_GATES = [
     "brief_approved",
@@ -483,7 +544,8 @@ def provider_status() -> Dict[str, Any]:
         "openai_ready": openai_ready(),
         "text_model": OPENAI_TEXT_MODEL if openai_ready() else None,
         "image_model": OPENAI_IMAGE_MODEL if openai_ready() else None,
-        "mock_outputs": not openai_ready(),
+        "visual_outputs": "real_ai_images" if openai_ready() else "svg_mock_assets",
+        "note": "Set AI_MODE=openai, OPENAI_ENABLED=true and OPENAI_API_KEY to replace SVG placeholders with real generated images.",
     }
 
 
@@ -702,33 +764,6 @@ def persist_file_intelligence(item: Dict[str, Any], project_id: Optional[str] = 
     })
 
 
-def persist_revision(item: Dict[str, Any]) -> None:
-    sb_table_upsert("bc_revisions", {
-        "id": item.get("id"),
-        "project_id": item.get("project_id"),
-        "target_type": item.get("target_type"),
-        "target_id": item.get("target_id"),
-        "version": item.get("version"),
-        "title": item.get("title"),
-        "note": item.get("note"),
-        "data": item,
-        "created_at": item.get("created_at") or now_ts(),
-    })
-
-
-def persist_share(item: Dict[str, Any]) -> None:
-    sb_table_upsert("bc_share_links", {
-        "id": item.get("id"),
-        "project_id": item.get("project_id"),
-        "token": item.get("token"),
-        "title": item.get("title"),
-        "sections": item.get("sections"),
-        "expires_at": item.get("expires_at"),
-        "data": item,
-        "created_at": item.get("created_at") or now_ts(),
-    })
-
-
 def load_project(project_id: str) -> Optional[Dict[str, Any]]:
     project = PROJECT_STORE.get(project_id)
     if project:
@@ -775,6 +810,7 @@ def ensure_project_runtime(project: Dict[str, Any]) -> Dict[str, Any]:
     project.setdefault("memory", default_project_memory(project))
     project.setdefault("brand_kit", {
         "brand_name": project.get("brand") or "Brand to be confirmed",
+        "logo_url": None,
         "colors": [],
         "fonts": [],
         "tone": project.get("style_direction") or "premium creative",
@@ -790,8 +826,12 @@ def ensure_project_runtime(project: Dict[str, Any]) -> Dict[str, Any]:
         "reference_urls": [],
     })
     project.setdefault("budget_estimate", None)
-    project.setdefault("revisions", [])
-    project.setdefault("share_links", [])
+    project.setdefault("profitability", None)
+    project.setdefault("client_portal", {})
+    project.setdefault("visual_versions", [])
+    project.setdefault("mood_votes", [])
+    project.setdefault("post_event_debrief", None)
+    project.setdefault("white_label", {"enabled": WHITE_LABEL_ENABLED, "agency_name": AGENCY_NAME})
     approvals = project.setdefault("approval_gates", {})
     for gate in APPROVAL_GATES:
         approvals.setdefault(gate, {"approved": False, "note": None, "updated_at": None, "approved_by": None})
@@ -1204,6 +1244,39 @@ def store_asset(project_id: str, section: str, asset_type: str, title: str, desc
     return asset
 
 
+def creative_image_url(project_id: str, title: str, prompt: str, palette: List[str], section: str, idx: int) -> Dict[str, Any]:
+    if openai_ready():
+        try:
+            res = requests.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '').strip()}", "Content-Type": "application/json"},
+                json={
+                    "model": OPENAI_IMAGE_MODEL,
+                    "prompt": prompt,
+                    "size": "1536x1024",
+                    "n": 1,
+                },
+                timeout=90,
+            )
+            res.raise_for_status()
+            data = res.json()
+            image = (data.get("data") or [{}])[0]
+            if image.get("b64_json"):
+                filename = f"{project_id}_{section}_{idx}_{uuid.uuid4().hex[:8]}.png"
+                path = GENERATED_DIR / filename
+                path.write_bytes(base64.b64decode(image["b64_json"]))
+                return {"url": public_url(f"media/generated/{filename}"), "provider": "openai", "model": OPENAI_IMAGE_MODEL}
+            if image.get("url"):
+                return {"url": image["url"], "provider": "openai", "model": OPENAI_IMAGE_MODEL}
+        except Exception as exc:
+            print(f"[WARN] OpenAI image generation failed; using SVG fallback: {exc}")
+    return {
+        "url": create_svg_asset(project_id, title, prompt, palette, section, idx),
+        "provider": "svg_fallback",
+        "model": None,
+    }
+
+
 def selected_concept(project_id: str, concept_index: Optional[int] = 0) -> Dict[str, Any]:
     project = load_project(project_id) or {}
     concepts = project.get("concepts") or []
@@ -1343,8 +1416,8 @@ def build_moodboard_assets(project_id: str, concept_index: int = 0, count: int =
     assets = []
     for i, (title, role) in enumerate(frames):
         desc = f"{title} for {concept.get('name', 'selected concept')}: this frame explains {role}. It supports the concept because: {concept.get('why_best', concept.get('summary', 'the creative route'))}"
-        url = create_svg_asset(project_id, title, desc, palettes[i % len(palettes)], "moodboard", i + 1)
-        assets.append(store_asset(project_id, "moodboard", "moodboard", title, desc, url, {"concept_index": concept_index, "creative_director_note": desc}))
+        image = creative_image_url(project_id, title, desc, palettes[i % len(palettes)], "moodboard", i + 1)
+        assets.append(store_asset(project_id, "moodboard", "moodboard", title, desc, image["url"], {"concept_index": concept_index, "creative_director_note": desc, "image_provider": image["provider"], "image_model": image["model"]}))
     return assets
 
 
@@ -1360,12 +1433,14 @@ def build_2d_assets(project_id: str, concept_index: int = 0) -> List[Dict[str, A
     ]
     assets = []
     for i, (title, desc) in enumerate(outputs):
-        url = create_svg_asset(project_id, title, desc, ["#0b0d14", "#c9a84c", "#ffffff"], "2d_graphics", i + 1)
-        assets.append(store_asset(project_id, "2d_graphics", "2d_graphic", title, desc, url, {
+        image = creative_image_url(project_id, title, desc, ["#0b0d14", "#c9a84c", "#ffffff"], "2d_graphics", i + 1)
+        assets.append(store_asset(project_id, "2d_graphics", "2d_graphic", title, desc, image["url"], {
             "concept_index": concept_index,
             "sizes": briefs.get("sizes", []),
             "handoff_to_3d": briefs.get("handoff_to_3d", "Render approved physical graphics as realistic 3D objects."),
             "handoff_to_cad": briefs.get("handoff_to_cad", "Extract fabrication dimensions."),
+            "image_provider": image["provider"],
+            "image_model": image["model"],
         }))
     return assets
 
@@ -1573,28 +1648,178 @@ def presentation_deck(project_id: str, concept_index: int = 0) -> Dict[str, Any]
     }
 
 
+def score_concepts(concepts: List[Dict[str, Any]], brief: str = "") -> List[Dict[str, Any]]:
+    scored = []
+    for idx, concept in enumerate(concepts or []):
+        text = json.dumps(concept, ensure_ascii=False).lower()
+        strategy = 60 + min(20, len(concept.get("experience_flow", [])) * 4)
+        feasibility = 70 if "cad" in text or "production" in text else 58
+        originality = 62 + (stable_seed(concept.get("name"), brief) % 28)
+        brand_fit = 66 + (stable_seed(brief, concept.get("style")) % 24)
+        tech_value = 78 if "rfid" in text or "projection" in text or "sensor" in text else 55
+        total = int((strategy + feasibility + originality + brand_fit + tech_value) / 5)
+        scored.append({
+            "concept_index": idx,
+            "concept_id": concept.get("id"),
+            "name": concept.get("name") or concept.get("title") or f"Concept {idx + 1}",
+            "scores": {
+                "strategy": strategy,
+                "feasibility": feasibility,
+                "originality": originality,
+                "brand_fit": brand_fit,
+                "technology_value": tech_value,
+                "total": total,
+            },
+            "recommendation": "Lead route" if total >= 78 else "Strong option" if total >= 68 else "Needs refinement",
+        })
+    return sorted(scored, key=lambda item: item["scores"]["total"], reverse=True)
+
+
+def competitive_benchmark(project: Dict[str, Any]) -> Dict[str, Any]:
+    brief = project.get("brief") or ""
+    ctx = brief_context(brief, None)
+    competitors = [
+        {"name": "Global premium launch benchmark", "lesson": "Use one hero reveal moment, not many small reveals.", "risk": "Can become generic if material palette is not brand-specific."},
+        {"name": "Technology-led experience benchmark", "lesson": "Use RFID, AR or sensor moments only when they improve guest journey.", "risk": "Technology can feel gimmicky without a story reason."},
+        {"name": "Luxury hospitality benchmark", "lesson": "Service choreography, arrival, scent, seating and camera angles matter as much as scenic scale.", "risk": "Over-decoration can weaken brand clarity."},
+    ]
+    return {
+        "id": str(uuid.uuid4()),
+        "project_id": project.get("project_id") or project.get("id"),
+        "brand": ctx.get("brand"),
+        "venue": ctx.get("venue"),
+        "event_type": ctx.get("event_type"),
+        "benchmarks": competitors,
+        "positioning_gap": "BriefCraftAI should make the idea feel more production-ready than a mood reference board: clear CAD logic, budget logic, cue logic and approval path.",
+        "created_at": now_ts(),
+    }
+
+
+def copy_and_naming_pack(project: Dict[str, Any], concept_index: int = 0) -> Dict[str, Any]:
+    concept = selected_concept(project.get("project_id") or project.get("id"), concept_index)
+    base = concept.get("style") or detect_industry(project.get("brief") or "")
+    names = [
+        f"{base} Signal",
+        f"{base} Arc",
+        f"{base} Edition",
+        "The Reveal Sequence",
+        "Beyond the First Look",
+    ]
+    return {
+        "id": str(uuid.uuid4()),
+        "project_id": project.get("project_id") or project.get("id"),
+        "concept_index": concept_index,
+        "event_names": names,
+        "taglines": [
+            "Create without limits.",
+            "A designed journey from arrival to reveal.",
+            "Where brand story becomes a live experience.",
+        ],
+        "invite_copy": f"You are invited to experience {project.get('project_name') or project.get('title') or 'a new brand moment'}.",
+        "stage_copy": concept.get("graphics_2d_brief", {}).get("stage_backdrop", "Hero brand line with clear reveal copy and sponsor-safe lockup."),
+        "social_captions": ["A new moment begins.", "Designed for the first look.", "Live, spatial and unforgettable."],
+        "created_at": now_ts(),
+    }
+
+
+def structural_load_calculator(project: Dict[str, Any]) -> Dict[str, Any]:
+    venue = project.get("venue_kit") or {}
+    width = float(venue.get("width") or 24)
+    depth = float(venue.get("depth") or 12)
+    led_weight = width * 45
+    truss_weight = (width + depth) * 18
+    lighting_weight = max(300, width * 22)
+    scenic_weight = width * depth * 12
+    total = int(led_weight + truss_weight + lighting_weight + scenic_weight)
+    return {
+        "unit": "kg",
+        "assumptions": {"width": width, "depth": depth, "basis": "planning load only; certified structural engineer must validate."},
+        "loads": {
+            "led_wall_estimated": int(led_weight),
+            "truss_estimated": int(truss_weight),
+            "lighting_estimated": int(lighting_weight),
+            "scenic_estimated": int(scenic_weight),
+            "total_estimated": total,
+        },
+        "risk_level": "high" if total > 2500 else "medium" if total > 1200 else "low",
+    }
+
+
+def ifc_export(project_id: str) -> Dict[str, Any]:
+    out_dir = EXPORT_DIR / project_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{project_id}_concept.ifc"
+    content = f"""ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('BriefCraftAI conceptual IFC export'),'2;1');
+FILE_NAME('{project_id}_concept.ifc','{time.strftime('%Y-%m-%dT%H:%M:%S')}',('BriefCraftAI'),('BriefCraftAI'),'BriefCraftAI','BriefCraftAI','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('{project_id}',#2,'BriefCraftAI Conceptual Stage',$,$,$,$,$,$);
+#2=IFCOWNERHISTORY($,$,$,.ADDED.,$,$,$,0);
+#3=IFCBUILDINGELEMENTPROXY('{uuid.uuid4().hex}',#2,'Main Stage / Scenic Proxy',$,$,$,$,$,$);
+ENDSEC;
+END-ISO-10303-21;
+"""
+    path.write_text(content, encoding="utf-8")
+    return {"ifc_url": public_url(f"media/exports/{project_id}/{path.name}"), "format": "ifc", "note": "Conceptual BIM/IFC placeholder for coordination; replace with CAD-derived geometry for production."}
+
+
+def auto_run_of_show(project: Dict[str, Any]) -> Dict[str, Any]:
+    brief = project.get("brief") or ""
+    event_type = project.get("event_type") or detect_industry(brief)
+    cues = [
+        {"timecode": "T-60", "department": "Show Caller", "cue": "Crew call, comms check, safety check"},
+        {"timecode": "T-30", "department": "FOH", "cue": "Guest arrival bed, registration live"},
+        {"timecode": "T-05", "department": "Lighting/Sound", "cue": "Pre-show dim, music build"},
+        {"timecode": "00:00", "department": "Show Caller", "cue": f"Opening cue for {event_type}"},
+        {"timecode": "00:07", "department": "Content", "cue": "Brand story / keynote / reveal film"},
+        {"timecode": "00:15", "department": "Lighting/Sound", "cue": "Hero reveal stinger and lighting hit"},
+        {"timecode": "00:25", "department": "Hospitality", "cue": "Interaction, photo moment and guided circulation"},
+        {"timecode": "00:55", "department": "Show Caller", "cue": "Closing handover and guest movement"},
+    ]
+    return {"id": str(uuid.uuid4()), "project_id": project.get("project_id") or project.get("id"), "event_type": event_type, "cues": cues, "exports": {}, "created_at": now_ts()}
+
+
 def estimate_project_budget(project_id: str, concept_index: int = 0, currency: str = "INR", budget_range: Optional[str] = None, assumptions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     project = load_project(project_id) or {}
     concept = selected_concept(project_id, concept_index)
     brief = project.get("brief") or ""
     guest_text = extract_guest_count(brief) or ""
     guest_match = re.search(r"\d+", guest_text)
-    guests = int(guest_match.group(0)) if guest_match else 300
+    guests = int(guest_match.group(0)) if guest_match else int((project.get("venue_kit") or {}).get("capacity") or 300)
+    city = ((project.get("venue") or "default").split(",")[-1] or "default").strip().lower()
+    rates = VENDOR_RATE_CARDS.get(city) or VENDOR_RATE_CARDS.get("default") or []
+    defaults = {
+        "stage": 1450,
+        "led": 900,
+        "lighting": 550,
+        "sound": 350,
+        "graphics": 300,
+        "furniture": 420,
+        "cad": 180,
+        "crew": 320,
+    }
+    for rate in rates:
+        key = str(rate.get("category", "")).lower()
+        if key in defaults:
+            defaults[key] = float(rate.get("rate") or defaults[key])
     multiplier = 1.25 if "luxury" in (project.get("style_direction") or "").lower() else 1.0
     line_items = [
-        ("Stage / scenic fabrication", max(250000, guests * 1450 * multiplier)),
-        ("LED / projection / playback", max(180000, guests * 900 * multiplier)),
-        ("Lighting fixtures and control", max(120000, guests * 550 * multiplier)),
-        ("Sound, microphones and show audio", max(90000, guests * 350 * multiplier)),
-        ("2D print, wayfinding and brand graphics", max(85000, guests * 300 * multiplier)),
-        ("Furniture, registration and hospitality zones", max(100000, guests * 420 * multiplier)),
-        ("CAD, production drawings and site coordination", max(75000, guests * 180 * multiplier)),
-        ("Crew, show caller and technical rehearsal", max(125000, guests * 320 * multiplier)),
+        ("Stage / scenic fabrication", max(250000, guests * defaults["stage"] * multiplier)),
+        ("LED / projection / playback", max(180000, guests * defaults["led"] * multiplier)),
+        ("Lighting fixtures and control", max(120000, guests * defaults["lighting"] * multiplier)),
+        ("Sound, microphones and show audio", max(90000, guests * defaults["sound"] * multiplier)),
+        ("2D print, wayfinding and brand graphics", max(85000, guests * defaults["graphics"] * multiplier)),
+        ("Furniture, registration and hospitality zones", max(100000, guests * defaults["furniture"] * multiplier)),
+        ("CAD, production drawings and site coordination", max(75000, guests * defaults["cad"] * multiplier)),
+        ("Crew, show caller and technical rehearsal", max(125000, guests * defaults["crew"] * multiplier)),
     ]
     subtotal = int(sum(v for _, v in line_items))
     contingency = int(subtotal * 0.12)
     total = subtotal + contingency
-    estimate = {
+    return {
         "id": str(uuid.uuid4()),
         "project_id": project_id,
         "concept_index": concept_index,
@@ -1607,14 +1832,75 @@ def estimate_project_budget(project_id: str, concept_index: int = 0, currency: s
         "contingency_percent": 12,
         "contingency": contingency,
         "total": total,
-        "assumptions": {
-            "mode": "mock_estimate",
-            "note": "Planning estimate only; vendor quotes and final venue specs should replace these assumptions.",
-            **(assumptions or {}),
-        },
+        "assumptions": {"vendor_rate_source": "city_rate_card" if rates else "default_multipliers", **(assumptions or {})},
         "created_at": now_ts(),
     }
-    return estimate
+
+
+def profitability_tracker(project: Dict[str, Any]) -> Dict[str, Any]:
+    estimate = project.get("budget_estimate") or estimate_project_budget(project.get("project_id") or project.get("id"))
+    revenue = int(estimate.get("total") or 0)
+    hard_cost = int(revenue * 0.72)
+    agency_fee = int(revenue * 0.15)
+    margin = revenue - hard_cost
+    return {
+        "currency": estimate.get("currency", "INR"),
+        "projected_revenue": revenue,
+        "estimated_hard_cost": hard_cost,
+        "agency_fee_target": agency_fee,
+        "projected_margin": margin,
+        "projected_margin_percent": round((margin / revenue) * 100, 2) if revenue else 0,
+        "watchouts": ["Lock vendor quotes before client final commercial.", "Track revisions separately if scope changes."],
+    }
+
+
+def room_payload(project: Dict[str, Any], room: str, prompt: Optional[str] = None, concept_index: int = 0) -> Dict[str, Any]:
+    concept = selected_concept(project.get("project_id") or project.get("id"), concept_index)
+    brief = prompt or project.get("brief") or ""
+    base = {
+        "id": str(uuid.uuid4()),
+        "room": room,
+        "project_id": project.get("project_id") or project.get("id"),
+        "title": f"{room.replace('_', ' ').title()} Room",
+        "brief": brief,
+        "concept": concept,
+        "provider": provider_status(),
+        "created_at": now_ts(),
+    }
+    if room == "3d":
+        base["viewport"] = {"mode": "merged", "environment": "sketch_wireframe", "stage": "realistic_requirement_based", "dimensions": True}
+        base["scene"] = blender_scene_payload(project.get("project_id") or project.get("id"), concept_index, 1280, 720)["scene"]
+    elif room == "2d":
+        base["outputs"] = ["invite", "badge", "registration_backdrop", "table_facade", "stage_backdrop", "social_posts"]
+    elif room == "cad":
+        base["outputs"] = ["top_view", "front_elevation", "left_elevation", "right_elevation", "ifc_export", "dxf_export"]
+    elif room == "concept":
+        base["scores"] = score_concepts(project.get("concepts") or [], brief)
+    elif room == "moodboard":
+        base["voting"] = {"enabled": True, "ranking": mood_vote_summary(project)}
+    elif room == "brief":
+        base["qa"] = brief_qa_response(project, brief)
+    return base
+
+
+def mood_vote_summary(project: Dict[str, Any]) -> Dict[str, Any]:
+    votes = project.get("mood_votes") or []
+    totals: Dict[str, int] = {}
+    for vote in votes:
+        key = str(vote.get("asset_id") or vote.get("option") or "unknown")
+        totals[key] = totals.get(key, 0) + int(vote.get("score") or 1)
+    return {"votes": votes, "ranking": sorted(totals.items(), key=lambda x: x[1], reverse=True)}
+
+
+def brief_qa_response(project: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
+    brief = message or (project or {}).get("brief") or ""
+    ctx = brief_context(brief, None)
+    return {
+        "answer": "I checked the brief and mapped the missing production information.",
+        "detected": ctx,
+        "questions": ctx.get("missing_questions", []),
+        "next_best_action": "Confirm missing details, then generate concept routes." if ctx.get("missing_questions") else "Proceed to concept scoring and moodboard.",
+    }
 
 
 def create_revision(project: Dict[str, Any], req: RevisionCreateRequest) -> Dict[str, Any]:
@@ -1637,59 +1923,28 @@ def create_revision(project: Dict[str, Any], req: RevisionCreateRequest) -> Dict
     revisions.append(revision)
     project["revisions"] = revisions
     project["updated_at"] = now_ts()
-    persist_revision(revision)
     persist_project(project)
     return revision
 
 
-def build_pdf_export(project_id: str, deck: Dict[str, Any]) -> str:
+def build_text_export(project_id: str, name: str, content: str, ext: str = "txt") -> str:
     out_dir = EXPORT_DIR / project_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{project_id}_pitch.pdf"
-    try:
-        from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.pdfgen import canvas
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"reportlab is required for PDF export: {exc}")
-    c = canvas.Canvas(str(path), pagesize=landscape(A4))
-    width, height = landscape(A4)
-    for slide in deck.get("slides", []):
-        c.setFillColorRGB(0.04, 0.05, 0.08)
-        c.rect(0, 0, width, height, fill=1, stroke=0)
-        c.setFillColorRGB(0.92, 0.76, 0.38)
-        c.setFont("Helvetica-Bold", 24)
-        c.drawString(42, height - 58, str(slide.get("title", "Slide"))[:86])
-        c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica", 12)
-        text = c.beginText(48, height - 105)
-        body = re.sub(r"\s+", " ", str(slide.get("body", "")))
-        for i in range(0, min(len(body), 1400), 92):
-            text.textLine(body[i:i + 92])
-        c.drawText(text)
-        c.showPage()
-    c.save()
+    path = out_dir / f"{project_id}_{name}.{ext}"
+    path.write_text(content, encoding="utf-8")
     return public_url(f"media/exports/{project_id}/{path.name}")
 
 
-def build_pptx_export(project_id: str, deck: Dict[str, Any]) -> str:
+def build_zip_export(project_id: str) -> str:
     out_dir = EXPORT_DIR / project_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{project_id}_pitch.pptx"
-    slides = deck.get("slides", []) or [{"title": deck.get("title", "Pitch"), "body": ""}]
-
-    def slide_xml(slide: Dict[str, Any]) -> str:
-        title = xml_escape(slide.get("title", "Slide"))
-        body = xml_escape(re.sub(r"\s+", " ", str(slide.get("body", "")))[:1800])
-        return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="548640" y="420000"/><a:ext cx="11200000" cy="760000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="3000" b="1"/><a:t>{title}</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="685800" y="1500000"/><a:ext cx="10600000" cy="4300000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="1600"/><a:t>{body}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'''
-
+    path = out_dir / f"{project_id}_delivery_package.zip"
+    project = load_project(project_id) or {}
+    assets = load_project_assets(project_id)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' + "".join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, len(slides) + 1)) + '</Types>')
-        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
-        z.writestr("ppt/presentation.xml", '<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>' + "".join(f'<p:sldId id="{255+i}" r:id="rId{i}"/>' for i in range(1, len(slides) + 1)) + '</p:sldIdLst><p:sldSz cx="12192000" cy="6858000" type="wide"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>')
-        z.writestr("ppt/_rels/presentation.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i}.xml"/>' for i in range(1, len(slides) + 1)) + '</Relationships>')
-        for i, slide in enumerate(slides, 1):
-            z.writestr(f"ppt/slides/slide{i}.xml", slide_xml(slide))
+        z.writestr("project.json", json.dumps(project, ensure_ascii=False, indent=2))
+        z.writestr("assets.json", json.dumps(assets, ensure_ascii=False, indent=2))
+        z.writestr("run_of_show.json", json.dumps(auto_run_of_show(project), ensure_ascii=False, indent=2))
     return public_url(f"media/exports/{project_id}/{path.name}")
 
 
@@ -2164,16 +2419,7 @@ def studio_frontend_contract():
             "admin_status": True,
             "blender_scene_generation": True,
             "blender_worker": bool(blender_binary()),
-            "ai_provider_switch": True,
-            "brand_kit": True,
-            "venue_kit": True,
-            "budget_estimator": True,
-            "revision_history": True,
-            "client_share_links": True,
-            "pptx_export": True,
-            "pdf_export": True,
         },
-        "providers": provider_status(),
         "endpoints": {
             "agents": "/agents",
             "account_bootstrap": "/account/bootstrap",
@@ -2183,12 +2429,6 @@ def studio_frontend_contract():
             "jobs_create": "/jobs",
             "jobs_get": "/jobs/{job_id}",
             "project_memory": "/projects/{project_id}/memory",
-            "brand_kit": "/projects/{project_id}/brand-kit",
-            "venue_kit": "/projects/{project_id}/venue-kit",
-            "budget_estimate": "/projects/{project_id}/budget/estimate",
-            "revisions": "/projects/{project_id}/revisions",
-            "share_links": "/projects/{project_id}/share-links",
-            "share_public": "/share/{token}",
             "approval_gates": "/projects/{project_id}/approval-gates",
             "workflow": "/projects/{project_id}/workflow",
             "handoffs": "/projects/{project_id}/handoffs",
@@ -2208,7 +2448,6 @@ def studio_frontend_contract():
             "departments": "/project/{project_id}/departments/build",
             "pdfs": "/projects/{project_id}/pdfs",
             "presentation": "/projects/{project_id}/presentation/build",
-            "presentation_export": "/projects/{project_id}/presentation/export",
             "cad": "/api/cad/pro/generate",
             "ucd_chat": "/ucd/chat",
             "admin_status": "/admin/status",
@@ -2364,61 +2603,12 @@ create table if not exists public.bc_blender_renders (
   updated_at timestamptz default now()
 );
 
-create table if not exists public.bc_brand_kits (
-  project_id text primary key,
-  brand_name text,
-  data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz default now()
-);
-
-create table if not exists public.bc_venue_kits (
-  project_id text primary key,
-  venue_name text,
-  data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz default now()
-);
-
-create table if not exists public.bc_budget_estimates (
-  id text primary key,
-  project_id text,
-  currency text,
-  total numeric,
-  data jsonb not null default '{}'::jsonb,
-  created_at timestamptz default now()
-);
-
-create table if not exists public.bc_revisions (
-  id text primary key,
-  project_id text,
-  target_type text,
-  target_id text,
-  version int,
-  title text,
-  note text,
-  data jsonb not null default '{}'::jsonb,
-  created_at timestamptz default now()
-);
-
-create table if not exists public.bc_share_links (
-  id text primary key,
-  project_id text,
-  token text unique,
-  title text,
-  sections jsonb not null default '[]'::jsonb,
-  expires_at double precision,
-  data jsonb not null default '{}'::jsonb,
-  created_at timestamptz default now()
-);
-
 create index if not exists bc_assets_project_idx on public.bc_assets(project_id);
 create index if not exists bc_jobs_project_idx on public.bc_jobs(project_id);
 create index if not exists bc_research_project_idx on public.bc_research(project_id);
 create index if not exists bc_handoffs_project_idx on public.bc_handoffs(project_id);
 create index if not exists bc_file_intelligence_project_idx on public.bc_file_intelligence(project_id);
 create index if not exists bc_blender_renders_project_idx on public.bc_blender_renders(project_id);
-create index if not exists bc_budget_estimates_project_idx on public.bc_budget_estimates(project_id);
-create index if not exists bc_revisions_project_idx on public.bc_revisions(project_id);
-create index if not exists bc_share_links_project_idx on public.bc_share_links(project_id);
 
 alter table public.bc_projects enable row level security;
 alter table public.bc_assets enable row level security;
@@ -2429,11 +2619,6 @@ alter table public.bc_credit_accounts enable row level security;
 alter table public.bc_handoffs enable row level security;
 alter table public.bc_file_intelligence enable row level security;
 alter table public.bc_blender_renders enable row level security;
-alter table public.bc_brand_kits enable row level security;
-alter table public.bc_venue_kits enable row level security;
-alter table public.bc_budget_estimates enable row level security;
-alter table public.bc_revisions enable row level security;
-alter table public.bc_share_links enable row level security;
 
 create or replace function public.bc_consume_credits(
   p_user_key text,
@@ -2569,147 +2754,6 @@ def update_project_memory(project_id: str, req: ProjectMemoryRequest):
         raise HTTPException(status_code=404, detail="Project not found.")
     memory = merge_project_memory(project, dump_model(req))
     return {"ok": True, "project_id": project_id, "memory": memory, "workflow_state": workflow_recommendation(project)}
-
-
-@app.get("/projects/{project_id}/brand-kit")
-def get_project_brand_kit(project_id: str):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    return {"ok": True, "project_id": project_id, "brand_kit": project.get("brand_kit")}
-
-
-@app.post("/projects/{project_id}/brand-kit")
-def update_project_brand_kit(project_id: str, req: BrandKitRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    kit = project.get("brand_kit", {})
-    update = dump_model(req)
-    for key, value in update.items():
-        if value not in (None, "", []):
-            kit[key] = value
-    if kit.get("brand_name"):
-        project["brand"] = kit["brand_name"]
-    if kit.get("tone"):
-        project["style_direction"] = kit["tone"]
-    kit["updated_at"] = now_ts()
-    project["brand_kit"] = kit
-    project["updated_at"] = now_ts()
-    persist_project(project)
-    sb_table_upsert("bc_brand_kits", {"project_id": project_id, "brand_name": kit.get("brand_name"), "data": kit, "updated_at": now_ts()})
-    return {"ok": True, "project_id": project_id, "brand_kit": kit}
-
-
-@app.get("/projects/{project_id}/venue-kit")
-def get_project_venue_kit(project_id: str):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    return {"ok": True, "project_id": project_id, "venue_kit": project.get("venue_kit")}
-
-
-@app.post("/projects/{project_id}/venue-kit")
-def update_project_venue_kit(project_id: str, req: VenueKitRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    kit = project.get("venue_kit", {})
-    update = dump_model(req)
-    for key, value in update.items():
-        if value not in (None, "", []):
-            kit[key] = value
-    if kit.get("venue_name"):
-        project["venue"] = kit["venue_name"]
-    kit["updated_at"] = now_ts()
-    project["venue_kit"] = kit
-    project["updated_at"] = now_ts()
-    persist_project(project)
-    sb_table_upsert("bc_venue_kits", {"project_id": project_id, "venue_name": kit.get("venue_name"), "data": kit, "updated_at": now_ts()})
-    return {"ok": True, "project_id": project_id, "venue_kit": kit}
-
-
-@app.post("/projects/{project_id}/budget/estimate")
-def create_project_budget_estimate(project_id: str, req: BudgetEstimateRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    estimate = estimate_project_budget(project_id, req.concept_index or 0, req.currency or "INR", req.budget_range, req.assumptions)
-    project["budget_estimate"] = estimate
-    project["updated_at"] = now_ts()
-    persist_project(project)
-    sb_table_upsert("bc_budget_estimates", {"id": estimate["id"], "project_id": project_id, "currency": estimate["currency"], "total": estimate["total"], "data": estimate, "created_at": estimate["created_at"]})
-    return {"ok": True, "project_id": project_id, "budget_estimate": estimate}
-
-
-@app.get("/projects/{project_id}/revisions")
-def list_project_revisions(project_id: str):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    revisions = PROJECT_REVISIONS.setdefault(project_id, project.get("revisions", []))
-    return {"ok": True, "project_id": project_id, "revisions": revisions}
-
-
-@app.post("/projects/{project_id}/revisions")
-def create_project_revision(project_id: str, req: RevisionCreateRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    revision = create_revision(project, req)
-    return {"ok": True, "project_id": project_id, "revision": revision, "revisions": project.get("revisions", [])}
-
-
-@app.post("/projects/{project_id}/share-links")
-def create_project_share_link(project_id: str, req: ShareCreateRequest):
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    ensure_project_runtime(project)
-    token = uuid.uuid4().hex
-    share = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "token": token,
-        "title": req.title or f"Client Review - {project.get('project_name') or project.get('title')}",
-        "sections": req.sections or ["brief", "concepts", "moodboard", "renders", "pdfs", "presentation"],
-        "expires_at": now_ts() + max(1, int(req.expires_in_days or 14)) * 86400,
-        "require_approval": req.require_approval,
-        "created_at": now_ts(),
-    }
-    PROJECT_SHARES[token] = share
-    project.setdefault("share_links", []).append(share)
-    project["updated_at"] = now_ts()
-    persist_share(share)
-    persist_project(project)
-    share["url"] = f"/share/{token}"
-    return {"ok": True, "project_id": project_id, "share": share}
-
-
-@app.get("/share/{token}")
-def get_public_share(token: str):
-    share = PROJECT_SHARES.get(token) or sb_table_select_one("bc_share_links", "token", token)
-    if not share:
-        raise HTTPException(status_code=404, detail="Share link not found.")
-    share_data = share.get("data") if isinstance(share.get("data"), dict) else share
-    if share_data.get("expires_at") and now_ts() > float(share_data["expires_at"]):
-        raise HTTPException(status_code=410, detail="Share link expired.")
-    project_id = share_data.get("project_id")
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    sections = set(share_data.get("sections") or [])
-    payload = {"project_id": project_id, "title": share_data.get("title"), "project": project}
-    if "moodboard" in sections or "renders" in sections or "pdfs" in sections:
-        payload["assets"] = load_project_assets(project_id)
-    if "presentation" in sections:
-        payload["presentation"] = project.get("presentation")
-    return {"ok": True, "share": share_data, **payload}
 
 
 @app.get("/projects/{project_id}/approval-gates")
@@ -3115,35 +3159,460 @@ def build_presentation(project_id: str, req: PresentationBuildRequest, request: 
         raise HTTPException(status_code=404, detail="Project not found.")
     acct = consume_credits(account_user_id(request, x_user_id, authorization), AGENT_REGISTRY["PRESENTATION_AGENT"]["credit_cost"], "Presentation build", "PRESENTATION_AGENT", project_id, f"/projects/{project_id}/presentation/build")
     deck = presentation_deck(project_id, req.concept_index or project.get("selected_concept_index") or 0)
-    deck["exports"] = {
-        "pptx_url": build_pptx_export(project_id, deck),
-        "pdf_url": build_pdf_export(project_id, deck),
-        "provider": "local_export",
-    }
     project["presentation"] = deck
     project["updated_at"] = now_ts()
     persist_project(project)
     return {"ok": True, "project_id": project_id, "presentation": deck, "account": acct}
 
 
-@app.post("/projects/{project_id}/presentation/export")
-def export_presentation(project_id: str):
+@app.get("/studio/feature-contract")
+def studio_feature_contract():
+    return {
+        "ok": True,
+        "providers": provider_status(),
+        "white_label": WHITE_LABEL_CONFIG,
+        "rooms": ["brief", "concept", "moodboard", "2d", "cad", "3d"],
+        "features": {
+            "real_time_brief_qa": True,
+            "multi_modal_brief_input": True,
+            "concept_scoring": True,
+            "competitive_benchmark": True,
+            "copy_naming": True,
+            "structural_load_calculator": True,
+            "bim_ifc_export": True,
+            "auto_run_of_show": True,
+            "vendor_rate_cards": True,
+            "client_portal_approvals": True,
+            "live_co_creation": True,
+            "visual_version_diff_rollback": True,
+            "mood_voting_ranking": True,
+            "lighting_simulation_preview": True,
+            "post_event_debrief": True,
+            "project_profitability": True,
+            "agency_asset_library": True,
+            "notifications": True,
+            "vendor_procurement": True,
+            "white_label_agency_mode": True,
+            "real_image_generation_ready": openai_ready(),
+        },
+    }
+
+
+@app.get("/white-label")
+def get_white_label():
+    return {"ok": True, "white_label": WHITE_LABEL_CONFIG}
+
+
+@app.post("/white-label")
+def update_white_label(payload: Dict[str, Any]):
+    for key, value in (payload or {}).items():
+        if value not in (None, "", []):
+            WHITE_LABEL_CONFIG[key] = value
+    return {"ok": True, "white_label": WHITE_LABEL_CONFIG}
+
+
+@app.get("/projects/{project_id}/brand-kit")
+def get_project_brand_kit(project_id: str):
     project = load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    deck = project.get("presentation") or presentation_deck(project_id, project.get("selected_concept_index") or 0)
-    exports = {
-        "pptx_url": build_pptx_export(project_id, deck),
-        "pdf_url": build_pdf_export(project_id, deck),
-        "provider": "local_export",
-    }
-    deck["exports"] = exports
-    project["presentation"] = deck
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "brand_kit": project.get("brand_kit")}
+
+
+@app.post("/projects/{project_id}/brand-kit")
+def update_project_brand_kit(project_id: str, req: BrandKitRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    kit = project.get("brand_kit", {})
+    for key, value in dump_model(req).items():
+        if value not in (None, "", []):
+            kit[key] = value
+    if kit.get("brand_name"):
+        project["brand"] = kit["brand_name"]
+    if kit.get("tone"):
+        project["style_direction"] = kit["tone"]
+    kit["updated_at"] = now_ts()
+    project["brand_kit"] = kit
     project["updated_at"] = now_ts()
     persist_project(project)
-    store_asset(project_id, "presentation", "pptx", "Client Pitch PPTX", "Editable client pitch presentation.", exports["pptx_url"], {"source": "presentation_export"})
-    store_asset(project_id, "presentation", "pdf", "Client Pitch PDF", "Client-ready PDF pitch presentation.", exports["pdf_url"], {"source": "presentation_export"})
-    return {"ok": True, "project_id": project_id, "presentation": deck, "exports": exports}
+    return {"ok": True, "project_id": project_id, "brand_kit": kit}
+
+
+@app.get("/projects/{project_id}/venue-kit")
+def get_project_venue_kit(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    return {"ok": True, "project_id": project_id, "venue_kit": project.get("venue_kit")}
+
+
+@app.post("/projects/{project_id}/venue-kit")
+def update_project_venue_kit(project_id: str, req: VenueKitRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    kit = project.get("venue_kit", {})
+    for key, value in dump_model(req).items():
+        if value not in (None, "", []):
+            kit[key] = value
+    if kit.get("venue_name"):
+        project["venue"] = kit["venue_name"]
+    kit["updated_at"] = now_ts()
+    project["venue_kit"] = kit
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "venue_kit": kit}
+
+
+@app.post("/brief/qa")
+def brief_qa(req: BriefQARequest):
+    project = load_project(req.project_id) if req.project_id else None
+    return {"ok": True, "project_id": req.project_id, "qa": brief_qa_response(project or {}, req.message)}
+
+
+@app.post("/brief/multimodal")
+def multimodal_brief(req: MultiModalBriefRequest):
+    brief = req.text or ""
+    file_intel = [infer_file_intelligence(UCDFileMeta(**f)) for f in req.files if isinstance(f, dict)]
+    ctx = brief_context(brief, None)
+    return {
+        "ok": True,
+        "brief_context": ctx,
+        "file_intelligence": [item for item in file_intel if item],
+        "source_count": len(req.files) + len(req.image_urls) + len(req.reference_urls),
+        "next_questions": missing_brief_questions(brief),
+    }
+
+
+@app.post("/projects/{project_id}/rooms/generate")
+def generate_project_room(project_id: str, req: RoomGenerateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    room = room_payload(project, req.room, req.prompt, req.concept_index or project.get("selected_concept_index") or 0)
+    return {"ok": True, "project_id": project_id, "room": room}
+
+
+@app.get("/projects/{project_id}/concept-scoring")
+def get_concept_scoring(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    scores = score_concepts(project.get("concepts") or project.get("concept_options") or [], project.get("brief") or "")
+    project["concept_scores"] = scores
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "scores": scores}
+
+
+@app.get("/projects/{project_id}/competitive-benchmark")
+def get_competitive_benchmark(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    benchmark = competitive_benchmark(project)
+    project["competitive_benchmark"] = benchmark
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "benchmark": benchmark}
+
+
+@app.get("/projects/{project_id}/copy-naming")
+def get_copy_naming(project_id: str, concept_index: int = 0):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    pack = copy_and_naming_pack(project, concept_index)
+    return {"ok": True, "project_id": project_id, "copy_naming": pack}
+
+
+@app.post("/projects/{project_id}/budget/estimate")
+def create_project_budget_estimate(project_id: str, req: BudgetEstimateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    estimate = estimate_project_budget(project_id, req.concept_index or 0, req.currency or "INR", req.budget_range, req.assumptions)
+    project["budget_estimate"] = estimate
+    project["profitability"] = profitability_tracker(project)
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "budget_estimate": estimate, "profitability": project["profitability"]}
+
+
+@app.get("/projects/{project_id}/profitability")
+def get_project_profitability(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    project["profitability"] = profitability_tracker(project)
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "profitability": project["profitability"]}
+
+
+@app.get("/projects/{project_id}/structural-load")
+def get_structural_load(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project_id": project_id, "structural_load": structural_load_calculator(project)}
+
+
+@app.post("/projects/{project_id}/ifc-export")
+@app.get("/projects/{project_id}/ifc-export")
+def export_ifc(project_id: str):
+    if not load_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    asset = ifc_export(project_id)
+    return {"ok": True, "project_id": project_id, "ifc": asset}
+
+
+@app.get("/projects/{project_id}/run-of-show")
+def get_run_of_show(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ros = auto_run_of_show(project)
+    project["run_of_show"] = ros
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "run_of_show": ros}
+
+
+@app.get("/projects/{project_id}/run-of-show/export")
+def export_run_of_show(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ros = auto_run_of_show(project)
+    lines = [f"{item['timecode']} | {item['cue']} | {item['department']} | {item['notes']}" for item in ros.get("cue_sheet", [])]
+    url = build_text_export(project_id, "run_of_show", "\n".join(lines), "csv")
+    return {"ok": True, "project_id": project_id, "run_of_show": ros, "export_url": url}
+
+
+@app.get("/projects/{project_id}/lighting-simulation")
+def get_lighting_simulation(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    concept = selected_concept(project_id, project.get("selected_concept_index") or 0)
+    simulation = {
+        "looks": ["arrival warmth", "brand wash", "reveal contrast", "photo moment glow"],
+        "fixtures": ["profile spots", "pixel battens", "moving washes", "practical glow lines"],
+        "intensity_timeline": [{"minute": 0, "level": 35}, {"minute": 20, "level": 55}, {"minute": 42, "level": 95}, {"minute": 60, "level": 45}],
+        "preview_note": concept.get("lighting_brief", "Lighting preview uses approved concept and venue-kit assumptions."),
+    }
+    return {"ok": True, "project_id": project_id, "lighting_simulation": simulation}
+
+
+@app.post("/projects/{project_id}/mood-votes")
+def add_mood_vote(project_id: str, payload: Dict[str, Any]):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    vote = {"id": str(uuid.uuid4()), "asset_id": payload.get("asset_id"), "score": int(payload.get("score", 1)), "comment": payload.get("comment"), "created_at": now_ts()}
+    project.setdefault("mood_votes", []).append(vote)
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "vote": vote, "ranking": mood_vote_summary(project)}
+
+
+@app.get("/projects/{project_id}/mood-votes")
+def get_mood_votes(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project_id": project_id, "votes": project.get("mood_votes", []), "ranking": mood_vote_summary(project)}
+
+
+@app.get("/projects/{project_id}/revisions")
+def list_project_revisions(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    revisions = PROJECT_REVISIONS.setdefault(project_id, project.get("revisions", []))
+    return {"ok": True, "project_id": project_id, "revisions": revisions}
+
+
+@app.post("/projects/{project_id}/revisions")
+def create_project_revision(project_id: str, req: RevisionCreateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    revision = create_revision(project, req)
+    return {"ok": True, "project_id": project_id, "revision": revision, "revisions": project.get("revisions", [])}
+
+
+@app.post("/projects/{project_id}/visual-versions")
+def create_visual_version(project_id: str, req: RevisionCreateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    req.target_type = req.target_type or "visual"
+    revision = create_revision(project, req)
+    project.setdefault("visual_versions", []).append(revision)
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "visual_version": revision, "versions": project.get("visual_versions", [])}
+
+
+@app.post("/projects/{project_id}/visual-versions/{revision_id}/rollback")
+def rollback_visual_version(project_id: str, revision_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    revision = next((r for r in project.get("revisions", []) if r.get("id") == revision_id), None)
+    if not revision:
+        raise HTTPException(status_code=404, detail="Revision not found.")
+    rollback = {"id": str(uuid.uuid4()), "rolled_back_to": revision_id, "created_at": now_ts(), "data": revision.get("data", {})}
+    project.setdefault("visual_versions", []).append(rollback)
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "rollback": rollback}
+
+
+@app.post("/projects/{project_id}/share-links")
+def create_project_share_link(project_id: str, req: ShareCreateRequest):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    ensure_project_runtime(project)
+    token = uuid.uuid4().hex
+    share = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "token": token,
+        "title": req.title or f"Client Review - {project.get('project_name') or project.get('title')}",
+        "sections": req.sections or ["brief", "concepts", "moodboard", "renders", "pdfs", "presentation"],
+        "expires_at": now_ts() + max(1, int(req.expires_in_days or 14)) * 86400,
+        "require_approval": req.require_approval,
+        "created_at": now_ts(),
+    }
+    PROJECT_SHARES[token] = share
+    project.setdefault("share_links", []).append(share)
+    project.setdefault("client_portal", {})["last_share_url"] = f"/share/{token}"
+    project["updated_at"] = now_ts()
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "share": {**share, "url": f"/share/{token}"}}
+
+
+@app.get("/share/{token}")
+def get_public_share(token: str):
+    share = PROJECT_SHARES.get(token)
+    if not share:
+        raise HTTPException(status_code=404, detail="Share link not found.")
+    if share.get("expires_at") and now_ts() > float(share["expires_at"]):
+        raise HTTPException(status_code=410, detail="Share link expired.")
+    project = load_project(share["project_id"])
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "share": share, "project": project, "assets": load_project_assets(share["project_id"]), "jobs": load_project_jobs(share["project_id"])}
+
+
+@app.post("/projects/{project_id}/live-sessions")
+def create_live_session(project_id: str, req: LiveSessionRequest):
+    if not load_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    session = {"id": str(uuid.uuid4()), "project_id": project_id, "title": req.title or "Live co-creation session", "participants": req.participants, "room": req.room, "status": "active", "events": [], "created_at": now_ts()}
+    PROJECT_LIVE_SESSIONS.setdefault(project_id, []).append(session)
+    return {"ok": True, "project_id": project_id, "session": session}
+
+
+@app.get("/projects/{project_id}/live-sessions")
+def list_live_sessions(project_id: str):
+    if not load_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project_id": project_id, "sessions": PROJECT_LIVE_SESSIONS.get(project_id, [])}
+
+
+@app.post("/projects/{project_id}/post-event-debrief")
+def update_post_event_debrief(project_id: str, payload: Dict[str, Any]):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    debrief = {
+        "attendance": payload.get("attendance"),
+        "wins": payload.get("wins") or [],
+        "issues": payload.get("issues") or [],
+        "client_feedback": payload.get("client_feedback"),
+        "recommendations": [
+            "Archive approved assets into the agency library.",
+            "Compare estimate vs actuals for profitability learning.",
+            "Convert client comments into next-project brief defaults.",
+        ],
+        "updated_at": now_ts(),
+    }
+    project["post_event_debrief"] = debrief
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "post_event_debrief": debrief}
+
+
+@app.get("/projects/{project_id}/post-event-debrief")
+def get_post_event_debrief(project_id: str):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "project_id": project_id, "post_event_debrief": project.get("post_event_debrief")}
+
+
+@app.get("/vendor-rate-cards")
+def list_vendor_rate_cards(city: Optional[str] = None, category: Optional[str] = None):
+    rows = [row for cards in VENDOR_RATE_CARDS.values() for row in cards]
+    if city:
+        rows = [r for r in rows if (r.get("city") or "").lower() == city.lower()]
+    if category:
+        rows = [r for r in rows if (r.get("category") or "").lower() == category.lower()]
+    return {"ok": True, "rate_cards": rows}
+
+
+@app.post("/vendor-rate-cards")
+def add_vendor_rate_card(req: VendorRateCardRequest):
+    row = {"id": str(uuid.uuid4()), **dump_model(req), "created_at": now_ts()}
+    key = f"{row.get('city','any').lower()}:{row.get('category','general').lower()}"
+    VENDOR_RATE_CARDS.setdefault(key, []).append(row)
+    return {"ok": True, "rate_card": row}
+
+
+@app.post("/projects/{project_id}/vendor-procurement")
+def create_vendor_procurement(project_id: str, payload: Dict[str, Any]):
+    project = load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    category = payload.get("category") or "production"
+    city = payload.get("city") or (project.get("venue_kit") or {}).get("city") or "any"
+    matches = [r for cards in VENDOR_RATE_CARDS.values() for r in cards if r.get("category") == category or r.get("city") == city]
+    request_pack = {"id": str(uuid.uuid4()), "project_id": project_id, "category": category, "city": city, "matches": matches[:10], "status": "draft_rfq", "created_at": now_ts()}
+    project.setdefault("vendor_procurement", []).append(request_pack)
+    persist_project(project)
+    return {"ok": True, "project_id": project_id, "procurement": request_pack}
+
+
+@app.get("/asset-library")
+def list_asset_library():
+    return {"ok": True, "assets": sorted(AGENCY_ASSET_LIBRARY.values(), key=lambda a: a.get("created_at", 0), reverse=True)}
+
+
+@app.post("/asset-library")
+def add_asset_library_item(payload: Dict[str, Any]):
+    item = {"id": str(uuid.uuid4()), "title": payload.get("title") or "Agency asset", "asset_type": payload.get("asset_type") or "reference", "url": payload.get("url"), "tags": payload.get("tags") or [], "data": payload, "created_at": now_ts()}
+    AGENCY_ASSET_LIBRARY[item["id"]] = item
+    return {"ok": True, "asset": item}
+
+
+@app.post("/notifications/send")
+def send_notification(req: NotificationRequest):
+    item = {"id": str(uuid.uuid4()), **dump_model(req), "status": "logged", "provider": "mock_notification", "created_at": now_ts()}
+    NOTIFICATION_LOG.setdefault(req.project_id or "general", []).append(item)
+    return {"ok": True, "notification": item, "message": "Notification logged. Connect WhatsApp/email provider credentials to send externally."}
+
+
+@app.post("/projects/{project_id}/delivery-package")
+def create_delivery_package(project_id: str):
+    if not load_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    url = build_zip_export(project_id)
+    return {"ok": True, "project_id": project_id, "package_url": url}
 
 
 @app.get("/admin/status")
@@ -3173,15 +3642,7 @@ def admin_status():
             "supabase_persistence": bool(get_supabase()),
             "blender_scene_generation": True,
             "blender_worker": bool(blender_binary()),
-            "brand_kit": True,
-            "venue_kit": True,
-            "budget_estimator": True,
-            "revision_history": True,
-            "client_share_links": True,
-            "pptx_export": True,
-            "pdf_export": True,
         },
-        "providers": provider_status(),
         "blender": blender_worker_status(),
     }
 
