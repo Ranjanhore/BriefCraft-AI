@@ -1,29 +1,18 @@
 services:
   - type: web
     name: briefcraft-ai-backend
-    runtime: docker
+    runtime: python
     plan: free
-    dockerfilePath: ./Dockerfile
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
       - key: OPENAI_API_KEY
         sync: false
       - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
       - key: SUPABASE_KEY
         sync: false
-      - key: TAVILY_API_KEY
-        sync: false
-      - key: SERPER_API_KEY
-        sync: false
-      - key: BLENDER_BIN
-        value: /usr/bin/blender
-      - key: BLENDER_SCRIPT_PATH
-        value: blender_script.py
-      - key: BLENDER_OUTPUT_DIR
-        value: media/blender
-      - key: CAD_PRO_DIR
-        value: media/cad_pro
       - key: DEFAULT_CREDIT_GRANT
         value: "2500"
